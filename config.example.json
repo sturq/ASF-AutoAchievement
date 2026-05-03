@@ -1,0 +1,15 @@
+{
+    "_comment_top": "Drop the AutoAchievement block into your existing bot config (e.g. MyBot.json). Every key is optional.",
+    "SteamLogin": "your-steam-username",
+    "SteamPassword": "your-steam-password",
+    "Enabled": true,
+
+    "AutoAchievement": {
+        "Enabled": true,
+        "ScanIntervalHours": 12,
+        "InitialDelaySeconds": 60,
+        "PerGameDelayMilliseconds": 750,
+        "AttemptProtectedAchievements": false,
+        "Blacklist": [730, 570]
+    }
+}
