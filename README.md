@@ -27,7 +27,7 @@ Achievements with a non-zero `permission` flag in the schema are server-protecte
 
 You should see in the log:
 ```
-ASF-AutoAchievement v1.0.0.0 loaded — every bot's library will be scanned for new achievements.
+ASF-AutoAchievement vX.Y.Z.0 loaded — every bot's library will be scanned for new achievements.
 <Bot> > AutoAchievement: scan loop started.
 <Bot> > AutoAchievement: profile owned-games returned N entries.
 <Bot> > AutoAchievement: scanning N game(s) (skipping K blacklisted). Estimated time: ...
