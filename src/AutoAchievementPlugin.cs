@@ -570,7 +570,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// any exception so a misbehaving sibling can never break our scan.
 	private async Task SignalSiblingPauseAsync() {
 		try {
-			await _bot.Commands.Response(EAccess.Owner, "idlepause " + _bot.BotName, _bot.SteamID).ConfigureAwait(false);
+			// Pass our plugin name as the source so AutoIdle can attribute the
+			// pause time to "ASF-AutoAchievement" in its idleshow / idlestats output.
+			await _bot.Commands.Response(EAccess.Owner, "idlepause " + _bot.BotName + " ASF-AutoAchievement", _bot.SteamID).ConfigureAwait(false);
 		} catch (Exception ex) {
 			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idlepause signal threw — {ex.Message}");
 		}
