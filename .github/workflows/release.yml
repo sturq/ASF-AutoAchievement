@@ -1,37 +1,55 @@
 name: Build and Release
 
 # Triggers:
-#   - Pushing a tag like v1.2.3 → builds the plugin (stamped with that
-#     version), zips it with proper folder structure, and creates a GitHub
-#     Release with both the loose DLL and the zip attached.
-#   - Manual run from the Actions tab → CI build only, uploads the DLL as a
-#     workflow artifact you can download. Useful for testing without tagging.
+#   - Push to main → reads the latest v* tag, bumps patch by 1, builds the
+#     plugin (stamped with that version), tags the commit, and creates a
+#     GitHub Release with the loose DLL + a convenience zip attached.
+#     Skips when only docs / workflow files / config changed.
+#   - Manual run from the Actions tab → same flow, optional version override
+#     for emergencies. Useful if you want to skip ahead (e.g. force v1.1.0).
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - 'config.example.json'
+      - '.github/**'
   workflow_dispatch:
     inputs:
+      version_override:
+        description: 'Force a specific version (e.g. 1.1.0). Leave blank to auto-bump patch.'
+        required: false
+        default: ''
       asf_version:
         description: 'ArchiSteamFarm release to build against (e.g. 6.3.5.1)'
         required: false
         default: '6.3.5.1'
 
+# Bump these when you target a newer ASF / .NET. Keep in sync with the
+# README's compatibility note.
 env:
-  # Bump these when you target a newer ASF / .NET. Keep in sync with the
-  # README's compatibility note. Manual workflow_dispatch can override ASF.
   ASF_VERSION: '6.3.5.1'
   DOTNET_VERSION: '10.0.x'
+
+# Serialize runs so two near-simultaneous pushes don't both compute the same
+# "next version" and race to create the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # needed to attach files to a release
+      contents: write   # needed to create tags + attach release assets
 
     steps:
-      - name: Checkout
+      - name: Checkout (full history + tags)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need all tags so the auto-bump can find the latest
 
       - name: Set up .NET ${{ env.DOTNET_VERSION }}
         uses: actions/setup-dotnet@v4
@@ -46,6 +64,48 @@ jobs:
           if [ -z "$VERSION" ]; then VERSION="$ASF_VERSION"; fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building against ArchiSteamFarm $VERSION"
+
+      - name: Compute next plugin version
+        id: ver
+        env:
+          OVERRIDE: ${{ inputs.version_override }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$OVERRIDE" ]; then
+            NEXT="$OVERRIDE"
+            echo "Using manual override: v${NEXT}"
+          else
+            # Find the highest existing semver tag of the form vMAJOR.MINOR.PATCH.
+            LATEST=$(git tag -l 'v*' --sort=-v:refname | head -n 1)
+
+            if [ -z "$LATEST" ]; then
+              # No tags yet → start at 1.0.0.
+              NEXT="1.0.0"
+              echo "No existing v* tags. Starting at v${NEXT}."
+            else
+              STRIPPED="${LATEST#v}"
+              if [[ ! "$STRIPPED" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                echo "Latest tag '$LATEST' isn't a plain vMAJOR.MINOR.PATCH — bailing." >&2
+                exit 1
+              fi
+              MAJOR="${BASH_REMATCH[1]}"
+              MINOR="${BASH_REMATCH[2]}"
+              PATCH="${BASH_REMATCH[3]}"
+              NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              echo "Latest tag: ${LATEST}. Next version: v${NEXT}."
+            fi
+          fi
+
+          # Refuse to overwrite an existing tag — if a release for v$NEXT
+          # already exists, the user needs to bump explicitly via override.
+          if git rev-parse "v${NEXT}" >/dev/null 2>&1; then
+            echo "Tag v${NEXT} already exists. Use the workflow_dispatch override to pick a different version." >&2
+            exit 1
+          fi
+
+          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${NEXT}" >> "$GITHUB_OUTPUT"
 
       - name: Download ArchiSteamFarm ${{ steps.asf.outputs.version }} runtime
         env:
@@ -64,40 +124,17 @@ jobs:
             -d ASF
           ls -la ASF
 
-      - name: Resolve plugin version from tag
-        id: ver
-        run: |
-          set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
-            echo "version=${TAG_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "tag=v${TAG_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "Resolved version from tag: ${TAG_VERSION}"
-          else
-            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
-            echo "tag=manual" >> "$GITHUB_OUTPUT"
-            echo "No tag — manual run, version comes from csproj."
-          fi
-
       - name: Build plugin
         env:
           ASF_DIR: ${{ github.workspace }}/ASF
           PLUGIN_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          if [[ "${PLUGIN_VERSION}" != "0.0.0" ]]; then
-            # Stamp the assembly with the tag version (e.g. 1.2.3 → 1.2.3.0).
-            dotnet publish src/ASF-AutoAchievement.csproj \
-              --configuration Release \
-              --output publish \
-              --nologo \
-              -p:Version="${PLUGIN_VERSION}.0"
-          else
-            dotnet publish src/ASF-AutoAchievement.csproj \
-              --configuration Release \
-              --output publish \
-              --nologo
-          fi
+          dotnet publish src/ASF-AutoAchievement.csproj \
+            --configuration Release \
+            --output publish \
+            --nologo \
+            -p:Version="${PLUGIN_VERSION}.0"
           ls -la publish/ASF-AutoAchievement.dll
 
       - name: Compute MD5 of built DLL
@@ -109,30 +146,30 @@ jobs:
           echo "DLL MD5: ${MD5}"
 
       - name: Build a convenience zip alongside the loose DLL
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          # Lay out the file in the proper plugin subdirectory so the zip
-          # extracts cleanly into <ASF>/plugins/.
           mkdir -p stage/ASF-AutoAchievement
           cp publish/ASF-AutoAchievement.dll stage/ASF-AutoAchievement/
           (cd stage && zip -r "../ASF-AutoAchievement-${TAG}.zip" ASF-AutoAchievement)
           ls -la "ASF-AutoAchievement-${TAG}.zip"
 
-      - name: Upload CI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ASF-AutoAchievement
-          path: publish/ASF-AutoAchievement.dll
-          if-no-files-found: error
-          retention-days: 30
+      - name: Tag the release commit
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "sturq"
+          git config user.email "sturq@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
           files: |
             publish/ASF-AutoAchievement.dll
             ASF-AutoAchievement-${{ steps.ver.outputs.tag }}.zip
