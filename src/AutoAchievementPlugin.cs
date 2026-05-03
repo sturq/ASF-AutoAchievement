@@ -361,6 +361,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_currentScanGameID = null;
 		}
 
+		// Signal sibling plugins (currently: ASF-AutoIdle) to release the
+		// bot's "playing" slot for the duration of this scan. The command is
+		// silently ignored if no plugin handles it, so this is safe even when
+		// AutoIdle isn't installed.
+		await SignalSiblingPauseAsync().ConfigureAwait(false);
+
 		try {
 			int idx = 0;
 			foreach (uint appID in targets) {
@@ -415,6 +421,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				_currentScanGameID = null;
 			}
 			try { _bot.Actions.Resume(); } catch { }
+			// Tell sibling plugins (AutoIdle) the slot is free again.
+			await SignalSiblingResumeAsync().ConfigureAwait(false);
 		}
 
 		return result;
@@ -553,6 +561,26 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_lastScannedAt[appID] = DateTime.UtcNow;
 			_schemaTotal[appID] = total;
 			_schemaAlreadyUnlocked[appID] = alreadyUnlocked;
+		}
+	}
+
+	// Cross-plugin coordination via ASF's command bus. Currently only
+	// ASF-AutoIdle implements `idlepause` / `idleresume`; if it isn't
+	// installed the dispatch returns null and we simply move on. We swallow
+	// any exception so a misbehaving sibling can never break our scan.
+	private async Task SignalSiblingPauseAsync() {
+		try {
+			await _bot.Commands.Response(EAccess.Owner, "idlepause " + _bot.BotName, _bot.SteamID).ConfigureAwait(false);
+		} catch (Exception ex) {
+			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idlepause signal threw — {ex.Message}");
+		}
+	}
+
+	private async Task SignalSiblingResumeAsync() {
+		try {
+			await _bot.Commands.Response(EAccess.Owner, "idleresume " + _bot.BotName, _bot.SteamID).ConfigureAwait(false);
+		} catch (Exception ex) {
+			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idleresume signal threw — {ex.Message}");
 		}
 	}
 
