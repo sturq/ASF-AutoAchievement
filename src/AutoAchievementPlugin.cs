@@ -512,12 +512,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 		}
 
-		// Only a run that started fresh from the beginning AND walked the
-		// whole library counts as a "full library pass". Resume runs that
-		// only mop up the tail of a prior interrupted scan don't qualify —
-		// otherwise the "Scans completed" counter would jump after every
-		// reconnect/restart, even though no fresh sweep actually happened.
-		result.FullLibraryPass = completedAll && startIdx == 0;
+		// A "completed cycle" = walking from wherever this run started to
+		// the end of the library without break / cancel. Resume runs count
+		// too: across the disconnect, the prior session covered 1..startIdx
+		// and this session covered startIdx..end, so together they form
+		// exactly one full library cycle. Only runs that were interrupted
+		// mid-walk or returned early on empty discovery don't qualify.
+		result.FullLibraryPass = completedAll && targets.Count > 0;
 		return result;
 	}
 
@@ -713,8 +714,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private void LogScanSummary(ScanResult result, TimeSpan elapsed) {
 		List<string> lines = [];
 		string header = result.FullLibraryPass
-			? $"AutoAchievement: full library scan complete in {FormatDuration(elapsed)}."
-			: $"AutoAchievement: partial scan ended after {FormatDuration(elapsed)} (resume / cancellation — not counted as a full pass).";
+			? $"AutoAchievement: scan cycle complete in {FormatDuration(elapsed)} — waiting for next interval."
+			: $"AutoAchievement: scan interrupted after {FormatDuration(elapsed)} (will resume from this point next time).";
 		lines.Add(header);
 		lines.Add($"  Games scanned: {result.GamesProcessed}");
 		lines.Add($"    - With new achievements unlocked: {result.GamesWithUnlocks}");
@@ -953,8 +954,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			SavePersistentState();
 		}
 		LogScanSummary(result, elapsed);
-		string passLabel = result.FullLibraryPass ? "Full library scan" : "Partial scan";
-		return $"{passLabel} done in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
+		string passLabel = result.FullLibraryPass ? "Scan cycle complete" : "Scan interrupted";
+		return $"{passLabel} in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
 	}
 
 	internal async Task<string?> HandleScanGame(string[] args) {
