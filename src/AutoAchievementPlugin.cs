@@ -239,23 +239,32 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal void Start() {
-		PluginConfig cfg;
+		// Everything that touches _loop / _cts must stay inside the lock —
+		// otherwise concurrent Start() calls (UpdateConfig restart task +
+		// OnBotLoggedOn happening near-simultaneously after a config reload)
+		// can both pass the "is loop running?" check before either assigns
+		// _loop, spawning duplicate Tasks that race and cancel each other.
+		bool startedNew = false;
+		bool isDisabled = false;
 		lock (_gate) {
 			if (_loop is { IsCompleted: false }) {
 				return;
 			}
-			cfg = _config;
-			_cts = new CancellationTokenSource();
+			if (!(_enabledOverride ?? _config.Enabled)) {
+				isDisabled = true;
+			} else {
+				_cts = new CancellationTokenSource();
+				CancellationToken token = _cts.Token;
+				_loop = Task.Run(() => ScanLoopAsync(token));
+				startedNew = true;
+			}
 		}
 
-		if (!IsEnabled(cfg)) {
+		if (isDisabled) {
 			_bot.ArchiLogger.LogGenericInfo("AutoAchievement: disabled in config for this bot.");
-			return;
+		} else if (startedNew) {
+			_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan loop started.");
 		}
-
-		CancellationToken token = _cts!.Token;
-		_loop = Task.Run(() => ScanLoopAsync(token));
-		_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan loop started.");
 	}
 
 	internal async Task StopAsync() {
