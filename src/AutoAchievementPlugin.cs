@@ -420,9 +420,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				_currentScanStartedAt = null;
 				_currentScanGameID = null;
 			}
-			try { _bot.Actions.Resume(); } catch { }
-			// Tell sibling plugins (AutoIdle) the slot is free again.
-			await SignalSiblingResumeAsync().ConfigureAwait(false);
+
+			// Try AutoIdle first. If it acknowledges (returns a non-empty
+			// response), AutoIdle's restart will re-assert its batch via
+			// Play(batch) — calling Bot.Actions.Resume() ourselves first
+			// would just churn state and risk Steam ignoring the rapid
+			// pause→resume→play sequence. Only fall back to Resume() when
+			// AutoIdle isn't installed.
+			bool autoIdleAcknowledged = await SignalSiblingResumeAsync().ConfigureAwait(false);
+			if (!autoIdleAcknowledged) {
+				try { _bot.Actions.Resume(); } catch { }
+			}
 		}
 
 		return result;
@@ -578,11 +586,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
-	private async Task SignalSiblingResumeAsync() {
+	private async Task<bool> SignalSiblingResumeAsync() {
 		try {
-			await _bot.Commands.Response(EAccess.Owner, "idleresume " + _bot.BotName, _bot.SteamID).ConfigureAwait(false);
+			string? response = await _bot.Commands.Response(EAccess.Owner, "idleresume " + _bot.BotName, _bot.SteamID).ConfigureAwait(false);
+			// Empty / null response = no plugin handled the command (AutoIdle not installed).
+			return !string.IsNullOrEmpty(response);
 		} catch (Exception ex) {
 			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idleresume signal threw — {ex.Message}");
+			return false;
 		}
 	}
 
