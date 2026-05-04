@@ -198,6 +198,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private int _currentScanTotal;
 	private DateTime? _currentScanStartedAt;
 
+	// Resume point for an interrupted scan: the AppID that was about to be
+	// scanned when the previous run got cancelled (disconnect, plugin stop,
+	// ASF restart, etc.). Persisted in BotDatabase. Cleared when a scan
+	// completes fully, so the *next* scan after a clean run starts fresh.
+	private uint? _resumeFromAppID;
+
 	internal BotRuntime(Bot bot) {
 		_bot = bot ?? throw new ArgumentNullException(nameof(bot));
 	}
@@ -347,15 +353,42 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		HashSet<uint> blacklist = EffectiveBlacklist(cfg);
-		List<uint> targets = owned.Keys.Where(id => !blacklist.Contains(id)).ToList();
+		// Sort targets by AppID so the order is stable across runs — required
+		// for resume-from-position to work correctly across reconnects.
+		List<uint> targets = owned.Keys.Where(id => !blacklist.Contains(id))
+			.OrderBy(static id => id).ToList();
 
+		// Resume from where the previous run was interrupted, if applicable.
+		uint? resumeFrom;
+		lock (_gate) { resumeFrom = _resumeFromAppID; }
+
+		int startIdx = 0;
+		if (resumeFrom.HasValue) {
+			int found = targets.IndexOf(resumeFrom.Value);
+			if (found >= 0) {
+				startIdx = found;
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoAchievement: resuming previous interrupted scan at {found + 1}/{targets.Count} ({FormatID(resumeFrom.Value)})."
+				);
+			} else {
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoAchievement: previous interrupted scan was at AppID {resumeFrom.Value} but it's no longer in the library. Starting from the beginning."
+				);
+				lock (_gate) {
+					_resumeFromAppID = null;
+					SavePersistentState();
+				}
+			}
+		}
+
+		int remaining = targets.Count - startIdx;
 		_bot.ArchiLogger.LogGenericInfo(
-			$"AutoAchievement: scanning {targets.Count} game(s) (skipping {blacklist.Count} blacklisted). "
-			+ $"Estimated time: {FormatDuration(TimeSpan.FromMilliseconds((long) targets.Count * (cfg.PerGameDelayMilliseconds + 1500L)))}."
+			$"AutoAchievement: scanning {remaining} game(s) (of {targets.Count} total, skipping {blacklist.Count} blacklisted). "
+			+ $"Estimated time: {FormatDuration(TimeSpan.FromMilliseconds((long) remaining * (cfg.PerGameDelayMilliseconds + 1500L)))}."
 		);
 
 		lock (_gate) {
-			_currentScanIndex = 0;
+			_currentScanIndex = startIdx;
 			_currentScanTotal = targets.Count;
 			_currentScanStartedAt = DateTime.UtcNow;
 			_currentScanGameID = null;
@@ -367,15 +400,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		// AutoIdle isn't installed.
 		await SignalSiblingPauseAsync().ConfigureAwait(false);
 
+		bool completedAll = true;
 		try {
-			int idx = 0;
-			foreach (uint appID in targets) {
-				if (token.IsCancellationRequested) { break; }
+			for (int i = startIdx; i < targets.Count; i++) {
+				if (token.IsCancellationRequested) { completedAll = false; break; }
 
-				idx++;
+				uint appID = targets[i];
+				int displayIdx = i + 1;
+
+				// Persist resume point BEFORE processing this game. If the bot
+				// disconnects mid-scan, the next session resumes here.
 				lock (_gate) {
-					_currentScanIndex = idx;
+					_currentScanIndex = displayIdx;
 					_currentScanGameID = appID;
+					_resumeFromAppID = appID;
+					SavePersistentState();
 				}
 
 				// User has manually launched a game on this account. Hold the
@@ -383,8 +422,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				// our Play() / stat writes for any other app while they're
 				// in-game.
 				if (!_bot.IsPlayingPossible) {
-					await WaitWhilePlayingBlockedAsync(idx, targets.Count, appID, token).ConfigureAwait(false);
-					if (token.IsCancellationRequested) { break; }
+					await WaitWhilePlayingBlockedAsync(displayIdx, targets.Count, appID, token).ConfigureAwait(false);
+					if (token.IsCancellationRequested) { completedAll = false; break; }
 				}
 
 				try {
@@ -407,6 +446,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						result.Errors.Add((appID, outcome.Detail ?? "error"));
 					}
 				} catch (OperationCanceledException) {
+					completedAll = false;
 					throw;
 				} catch (Exception ex) {
 					_bot.ArchiLogger.LogGenericException(ex);
@@ -418,6 +458,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					try {
 						await Task.Delay(TimeSpan.FromMilliseconds(cfg.PerGameDelayMilliseconds), token).ConfigureAwait(false);
 					} catch (OperationCanceledException) {
+						completedAll = false;
 						break;
 					}
 				}
@@ -428,6 +469,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				_currentScanTotal = 0;
 				_currentScanStartedAt = null;
 				_currentScanGameID = null;
+
+				// Only clear the resume point if we made it all the way
+				// through. Cancellations (disconnect, restart, manual stop)
+				// preserve _resumeFromAppID so the next run picks up there.
+				if (completedAll) {
+					_resumeFromAppID = null;
+					SavePersistentState();
+				}
 			}
 
 			// Try AutoIdle first. If it acknowledges (returns a non-empty
@@ -1165,6 +1214,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				if (TryGetProp(state, "attemptProtectedOverride", out JsonElement prot)) {
 					if (prot.ValueKind == JsonValueKind.True) { _attemptProtectedOverride = true; } else if (prot.ValueKind == JsonValueKind.False) { _attemptProtectedOverride = false; }
 				}
+				if (TryGetProp(state, "resumeFromAppID", out JsonElement resEl)
+					&& resEl.ValueKind == JsonValueKind.Number
+					&& resEl.TryGetUInt32(out uint resId)
+					&& resId > 0) {
+					_resumeFromAppID = resId;
+				}
 				if (TryGetProp(state, "totalAchievementsUnlocked", out JsonElement tot)
 					&& tot.ValueKind == JsonValueKind.Number
 					&& tot.TryGetInt64(out long t) && t >= 0) {
@@ -1243,6 +1298,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string protectedPart = _attemptProtectedOverride.HasValue
 			? ",\"attemptProtectedOverride\":" + (_attemptProtectedOverride.Value ? "true" : "false")
 			: "";
+		string resumePart = _resumeFromAppID.HasValue
+			? ",\"resumeFromAppID\":" + _resumeFromAppID.Value.ToString(CultureInfo.InvariantCulture)
+			: "";
 		string totalPart = ",\"totalAchievementsUnlocked\":" + _totalAchievementsUnlocked.ToString(CultureInfo.InvariantCulture);
 		string lastPart = _lastScanCompletedAt.HasValue
 			? ",\"lastScanCompletedAt\":\"" + _lastScanCompletedAt.Value.ToString("o", CultureInfo.InvariantCulture) + "\""
@@ -1260,7 +1318,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string lastScannedMap = SerializeUintDateMap(_lastScannedAt);
 
 		string json = "{\"blacklist\":[" + blacklistCsv + "]"
-			+ intervalPart + enabledPart + protectedPart + totalPart + lastPart
+			+ intervalPart + enabledPart + protectedPart + resumePart + totalPart + lastPart
 			+ scansAllPart + scanSecsPart + uptimePart
 			+ ",\"allTimeUnlocked\":" + allTimeMap
 			+ ",\"schemaTotal\":" + schemaTotalMap
