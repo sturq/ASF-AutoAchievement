@@ -315,11 +315,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					ScanResult result = await ScanLibraryAsync(cfg, token).ConfigureAwait(false);
 					long elapsedSecs = (long) (DateTime.UtcNow - scanStartedAt).TotalSeconds;
 					lock (_gate) {
-						_lastScanCompletedAt = DateTime.UtcNow;
 						_totalAchievementsUnlocked += result.AchievementsUnlocked;
-						_scansCompletedAllTime++;
-						_scansCompletedSession++;
 						_scanSecondsAllTime += elapsedSecs;
+						if (result.FullLibraryPass) {
+							_lastScanCompletedAt = DateTime.UtcNow;
+							_scansCompletedAllTime++;
+							_scansCompletedSession++;
+						}
 						SavePersistentState();
 					}
 					LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
@@ -500,6 +502,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 		}
 
+		// Only a run that started fresh from the beginning AND walked the
+		// whole library counts as a "full library pass". Resume runs that
+		// only mop up the tail of a prior interrupted scan don't qualify —
+		// otherwise the "Scans completed" counter would jump after every
+		// reconnect/restart, even though no fresh sweep actually happened.
+		result.FullLibraryPass = completedAll && startIdx == 0;
 		return result;
 	}
 
@@ -694,7 +702,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 	private void LogScanSummary(ScanResult result, TimeSpan elapsed) {
 		List<string> lines = [];
-		lines.Add($"AutoAchievement: scan complete in {FormatDuration(elapsed)}.");
+		string header = result.FullLibraryPass
+			? $"AutoAchievement: full library scan complete in {FormatDuration(elapsed)}."
+			: $"AutoAchievement: partial scan ended after {FormatDuration(elapsed)} (resume / cancellation — not counted as a full pass).";
+		lines.Add(header);
 		lines.Add($"  Games scanned: {result.GamesProcessed}");
 		lines.Add($"    - With new achievements unlocked: {result.GamesWithUnlocks}");
 		lines.Add($"    - Already 100% complete: {result.GamesAlreadyComplete}");
@@ -922,15 +933,18 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		ScanResult result = await ScanLibraryAsync(cfg, cts.Token).ConfigureAwait(false);
 		TimeSpan elapsed = DateTime.UtcNow - startedAt;
 		lock (_gate) {
-			_lastScanCompletedAt = DateTime.UtcNow;
 			_totalAchievementsUnlocked += result.AchievementsUnlocked;
-			_scansCompletedAllTime++;
-			_scansCompletedSession++;
 			_scanSecondsAllTime += (long) elapsed.TotalSeconds;
+			if (result.FullLibraryPass) {
+				_lastScanCompletedAt = DateTime.UtcNow;
+				_scansCompletedAllTime++;
+				_scansCompletedSession++;
+			}
 			SavePersistentState();
 		}
 		LogScanSummary(result, elapsed);
-		return $"Scan complete in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
+		string passLabel = result.FullLibraryPass ? "Full library scan" : "Partial scan";
+		return $"{passLabel} done in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
 	}
 
 	internal async Task<string?> HandleScanGame(string[] args) {
@@ -1439,6 +1453,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		internal int GamesAlreadyComplete;
 		internal int GamesRejected;
 		internal int AchievementsUnlocked;
+		// True only when this run started from index 0 AND walked every game
+		// in the library without being cancelled / breaking out. Resume scans
+		// (picking up from a prior session's interrupted point), empty-pool
+		// returns, and cancellations all leave this false so the "scans
+		// completed" counter only reflects genuine full library passes.
+		internal bool FullLibraryPass;
 		internal readonly List<(uint AppID, int Unlocked, int Total)> Unlocks = new();
 		internal readonly List<(uint AppID, string Reason)> Rejections = new();
 		internal readonly List<(uint AppID, string Reason)> Errors = new();
