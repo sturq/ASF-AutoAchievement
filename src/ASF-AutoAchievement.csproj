@@ -14,7 +14,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>1.0.4.0</Version>
+    <Version>1.0.5.0</Version>
     <Authors>sturq</Authors>
     <Description>ArchiSteamFarm plugin that auto-detects every owned game and unlocks all available achievements (SAM Picker-style, but automated and recurring).</Description>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>

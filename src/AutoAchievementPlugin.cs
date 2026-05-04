@@ -378,6 +378,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					_currentScanGameID = appID;
 				}
 
+				// User has manually launched a game on this account. Hold the
+				// scan at this game until they close it — Steam won't accept
+				// our Play() / stat writes for any other app while they're
+				// in-game.
+				if (!_bot.IsPlayingPossible) {
+					await WaitWhilePlayingBlockedAsync(idx, targets.Count, appID, token).ConfigureAwait(false);
+					if (token.IsCancellationRequested) { break; }
+				}
+
 				try {
 					GameScanOutcome outcome = await ScanGameAsync(appID, cfg, token).ConfigureAwait(false);
 					result.GamesProcessed++;
@@ -562,6 +571,34 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string protectedNote = protectedSkipped > 0 ? $", {protectedSkipped} protected skipped" : "";
 		string detailMsg = $"unlocked {candidateCount}, now {newTotalUnlocked}/{totalInSchema}{protectedNote}";
 		return new GameScanOutcome(candidateCount, false, NoAchievements: false, AlreadyComplete: newTotalUnlocked == totalInSchema, Rejected: false, TotalInSchema: totalInSchema, Detail: detailMsg);
+	}
+
+	// Holds the scan at the current game while ASF reports the bot can't play
+	// games — i.e. the Steam account is currently in a game launched outside
+	// ASF (the user opened a title in their Steam client). Logs the stop and
+	// the resume so the user sees in the log exactly where the scan paused.
+	private async Task WaitWhilePlayingBlockedAsync(int idx, int total, uint appID, CancellationToken token) {
+		DateTime? blockedSince = null;
+		while (!token.IsCancellationRequested && !_bot.IsPlayingPossible) {
+			if (blockedSince is null) {
+				blockedSince = DateTime.UtcNow;
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) — user is playing a game on this account. Will resume at this game when free."
+				);
+			}
+			try {
+				await Task.Delay(TimeSpan.FromSeconds(15), token).ConfigureAwait(false);
+			} catch (OperationCanceledException) {
+				return;
+			}
+		}
+
+		if (blockedSince.HasValue && !token.IsCancellationRequested) {
+			TimeSpan blockedFor = DateTime.UtcNow - blockedSince.Value;
+			_bot.ArchiLogger.LogGenericInfo(
+				$"AutoAchievement: user closed their game, resuming scan at {idx}/{total} ({FormatID(appID)}) (paused {FormatDuration(blockedFor)})."
+			);
+		}
 	}
 
 	private void RecordSchemaSnapshot(uint appID, int total, int alreadyUnlocked) {

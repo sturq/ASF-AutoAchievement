@@ -171,15 +171,14 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
           files: |
-            publish/ASF-AutoAchievement.dll
             ASF-AutoAchievement-${{ steps.ver.outputs.tag }}.zip
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             ## Install
 
-            1. Download `ASF-AutoAchievement.dll` from the assets below (or the convenience zip if you prefer to extract directly into `<ASF>/plugins/`).
-            2. Drop `ASF-AutoAchievement.dll` into `<ASF>/plugins/ASF-AutoAchievement/`.
+            1. Download `ASF-AutoAchievement-${{ steps.ver.outputs.tag }}.zip` from the assets below.
+            2. Extract it directly into `<your ASF folder>/plugins/` — the zip already contains the proper `ASF-AutoAchievement/` subfolder.
             3. Add to any bot config under `<ASF>/config/<BotName>.json`:
                ```json
                "AutoAchievement": { "Enabled": true }
