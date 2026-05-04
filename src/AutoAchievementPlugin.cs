@@ -310,6 +310,36 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			while (!token.IsCancellationRequested) {
 				lock (_gate) { cfg = _config; }
 
+				// Cooldown check: if a cycle completed less than the configured
+				// interval ago AND we have no pending resume point from an
+				// earlier interrupted scan, sleep the remainder of the interval
+				// instead of starting a new cycle. Without this, every
+				// disconnect/reconnect (LoggedInElsewhere when the user opens
+				// Steam, etc.) would respawn ScanLoopAsync and immediately run
+				// a fresh full scan, ignoring the "once per interval" intent.
+				DateTime? lastCompleted;
+				bool hasResumePoint;
+				lock (_gate) {
+					lastCompleted = _lastScanCompletedAt;
+					hasResumePoint = _resumeFromAppID.HasValue;
+				}
+				if (lastCompleted.HasValue && !hasResumePoint) {
+					TimeSpan interval = TimeSpan.FromHours(EffectiveScanInterval(cfg));
+					TimeSpan elapsed = DateTime.UtcNow - lastCompleted.Value;
+					if (elapsed < interval) {
+						TimeSpan remaining = interval - elapsed;
+						_bot.ArchiLogger.LogGenericInfo(
+							$"AutoAchievement: last cycle completed {FormatDuration(elapsed)} ago, next scan in {FormatDuration(remaining)}."
+						);
+						try {
+							await Task.Delay(remaining, token).ConfigureAwait(false);
+						} catch (OperationCanceledException) {
+							break;
+						}
+						continue;
+					}
+				}
+
 				DateTime scanStartedAt = DateTime.UtcNow;
 				bool fullPass = false;
 				try {
