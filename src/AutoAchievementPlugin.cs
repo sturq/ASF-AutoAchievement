@@ -311,13 +311,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				lock (_gate) { cfg = _config; }
 
 				DateTime scanStartedAt = DateTime.UtcNow;
+				bool fullPass = false;
 				try {
 					ScanResult result = await ScanLibraryAsync(cfg, token).ConfigureAwait(false);
 					long elapsedSecs = (long) (DateTime.UtcNow - scanStartedAt).TotalSeconds;
+					fullPass = result.FullLibraryPass;
 					lock (_gate) {
 						_totalAchievementsUnlocked += result.AchievementsUnlocked;
 						_scanSecondsAllTime += elapsedSecs;
-						if (result.FullLibraryPass) {
+						if (fullPass) {
 							_lastScanCompletedAt = DateTime.UtcNow;
 							_scansCompletedAllTime++;
 							_scansCompletedSession++;
@@ -331,9 +333,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					_bot.ArchiLogger.LogGenericException(ex);
 				}
 
-				uint hours = EffectiveScanInterval(cfg);
+				// Only wait the full scan interval after an actual full library
+				// pass. Partial runs (resumed-from-prior-session, empty-pool
+				// returns, mid-run exceptions) loop straight into a fresh scan
+				// instead of sleeping for a day with nothing to do — the resume
+				// point is already cleared by ScanLibraryAsync's finally block,
+				// so the next iteration starts cleanly from index 0.
+				TimeSpan waitFor = fullPass
+					? TimeSpan.FromHours(EffectiveScanInterval(cfg))
+					: TimeSpan.FromSeconds(30);
 				try {
-					await Task.Delay(TimeSpan.FromHours(hours), token).ConfigureAwait(false);
+					await Task.Delay(waitFor, token).ConfigureAwait(false);
 				} catch (OperationCanceledException) {
 					break;
 				}
