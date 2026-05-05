@@ -147,15 +147,14 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 	private static string HelpText() => string.Join('\n', new[] {
 		"AutoAchievement commands:",
 		"  aashow [bot]                              — status, current scan progress, totals",
-		"  aanow [bot]                               — run a full library scan immediately",
+		"  aanow [bot]                               — run a full library scan immediately (alias: aascan)",
+		"  aacancel [bot]                            — cancel the in-flight scan, AutoIdle resumes (alias: aastop)",
 		"  aagame [bot] <appid|name>                 — unlock achievements for a single game",
 		"  aastats [bot] [N|all]                     — per-game stats (default: all, sorted by all-time desc)",
 		"  aablacklist [bot] <appid|name>            — never touch this game",
 		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
-		"  aainterval [bot] <hours>                  — change scan interval (0 to reset)",
+		"  aainterval [bot] <days>                   — change scan interval in days (0 to reset to default)",
 		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
-		"  aanow [bot]                               — same as aascan, runs a scan immediately",
-		"  aacancel [bot]                            — cancel the in-flight scan and let AutoIdle take over",
 		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
 		"  aahelp                                    — this message"
 	});
