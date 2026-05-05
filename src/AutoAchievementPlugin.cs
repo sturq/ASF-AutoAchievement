@@ -126,6 +126,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 			"AABLACKLISTREMOVE" or "AABLRM" or "AAUNBLOCK" => runtime.HandleRemoveBlacklist(tail),
 			"AAINTERVAL" or "AAINT" => runtime.HandleInterval(tail),
 			"AAPROTECTED" or "AAPROT" => runtime.HandleProtected(tail),
+			"AAPROFILE" or "AAPROFILEGAMES" or "AAONLYPROFILE" => runtime.HandleProfileGamesToggle(),
 			"AATOGGLE" => runtime.HandleToggle(),
 			"AAHELP" => HelpText(),
 			_ => null
@@ -153,6 +154,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
 		"  aainterval [bot] <hours>                  — change scan interval (0 to reset)",
 		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
+		"  aaprofile [bot]                           — toggle OnlyProfileGames (profile games vs full dynamicstore)",
 		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
 		"  aahelp                                    — this message"
 	});
@@ -174,6 +176,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private uint? _scanIntervalHoursOverride;
 	private bool? _enabledOverride;
 	private bool? _attemptProtectedOverride;
+	private bool? _onlyProfileGamesOverride;
 	private long _totalAchievementsUnlocked;
 	private bool _persistentLoaded;
 
@@ -226,7 +229,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		_bot.ArchiLogger.LogGenericInfo(
 			$"AutoAchievement config: Enabled={IsEnabled(config)}, ScanIntervalHours={EffectiveScanInterval(config)}, "
 			+ $"InitialDelaySeconds={config.InitialDelaySeconds}, PerGameDelayMs={config.PerGameDelayMilliseconds}, "
-			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, "
+			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, OnlyProfileGames={EffectiveOnlyProfileGames(config)}, "
 			+ $"ConfigBlacklist={config.Blacklist.Count}, PersistentBlacklist={_persistentBlacklist.Count}"
 		);
 
@@ -390,23 +393,47 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private async Task<ScanResult> ScanLibraryAsync(PluginConfig cfg, CancellationToken token) {
 		ScanResult result = new();
 
-		IReadOnlyDictionary<uint, string>? owned = await GameDiscovery.GetOwnedGamesAsync(_bot).ConfigureAwait(false);
-		if (owned is null || owned.Count == 0) {
-			return result;
+		// Always pull the profile-games list at least once per scan so we
+		// have display names for log output. Even when OnlyProfileGames is
+		// false we still want names where they exist; AppIDs only present
+		// in dynamicstore (DLC/demos/unplayed F2P) just show as "AppID N".
+		IReadOnlyDictionary<uint, string>? profile = await GameDiscovery.GetProfileGamesAsync(_bot).ConfigureAwait(false);
+		if (profile is not null) {
+			lock (_gate) {
+				foreach (KeyValuePair<uint, string> kvp in profile) {
+					if (!string.IsNullOrEmpty(kvp.Value)) {
+						_nameCache[kvp.Key] = kvp.Value;
+					}
+				}
+			}
 		}
 
-		lock (_gate) {
-			foreach (KeyValuePair<uint, string> kvp in owned) {
-				if (!string.IsNullOrEmpty(kvp.Value)) {
-					_nameCache[kvp.Key] = kvp.Value;
+		HashSet<uint> targetSet;
+		if (EffectiveOnlyProfileGames(cfg)) {
+			if (profile is null || profile.Count == 0) {
+				return result;
+			}
+			targetSet = [.. profile.Keys];
+		} else {
+			IReadOnlyCollection<uint> all = await GameDiscovery.GetAllOwnedAppIDsAsync(_bot).ConfigureAwait(false);
+			if (all.Count == 0) {
+				// Dynamicstore failed; fall back to profile games rather than
+				// returning empty (otherwise an empty scan would count as a
+				// completed cycle and burn a 24h slot).
+				if (profile is null || profile.Count == 0) {
+					return result;
 				}
+				targetSet = [.. profile.Keys];
+				_bot.ArchiLogger.LogGenericWarning("AutoAchievement: dynamicstore returned empty, falling back to profile-only games for this cycle.");
+			} else {
+				targetSet = [.. all];
 			}
 		}
 
 		HashSet<uint> blacklist = EffectiveBlacklist(cfg);
 		// Sort targets by AppID so the order is stable across runs — required
 		// for resume-from-position to work correctly across reconnects.
-		List<uint> targets = owned.Keys.Where(id => !blacklist.Contains(id))
+		List<uint> targets = targetSet.Where(id => !blacklist.Contains(id))
 			.OrderBy(static id => id).ToList();
 
 		// Resume from where the previous run was interrupted, if applicable.
@@ -837,8 +864,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add($"  Scan interval: every {EffectiveScanInterval(cfg)} h{(intervalOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Initial delay: {cfg.InitialDelaySeconds}s, per-game delay: {cfg.PerGameDelayMilliseconds}ms");
 		bool? protOverride;
-		lock (_gate) { protOverride = _attemptProtectedOverride; }
+		bool? opgOverride;
+		lock (_gate) {
+			protOverride = _attemptProtectedOverride;
+			opgOverride = _onlyProfileGamesOverride;
+		}
 		lines.Add($"  AttemptProtectedAchievements: {EffectiveAttemptProtected(cfg)}{(protOverride.HasValue ? " (runtime override)" : "")}");
+		lines.Add($"  OnlyProfileGames: {EffectiveOnlyProfileGames(cfg)}{(opgOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Achievements unlocked: {sessionUnlocked} (this session) / {total} (all-time)");
 		lines.Add($"  Scans completed: {scansSession} (this session) / {scansAll} (all-time, total scan time {FormatDuration(TimeSpan.FromSeconds(scanSecsAll))})");
 
@@ -1112,6 +1144,38 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return $"Enabled = {newValue} (runtime override). Scan loop {(newValue ? "starting" : "stopping")} now.";
 	}
 
+	internal string HandleProfileGamesToggle() {
+		PluginConfig cfg;
+		lock (_gate) { cfg = _config; }
+
+		bool current = EffectiveOnlyProfileGames(cfg);
+		bool newValue = !current;
+
+		lock (_gate) {
+			_onlyProfileGamesOverride = newValue;
+			SavePersistentState();
+		}
+
+		// Wipe the resume point — the target list shape is changing, so a
+		// resume AppID from the prior mode might fall in the middle of a
+		// totally different ordered list, or might not even be present.
+		// Cleaner to start the next cycle fresh from index 0.
+		lock (_gate) {
+			_resumeFromAppID = null;
+			SavePersistentState();
+		}
+
+		_ = Task.Run(async () => {
+			await StopAsync().ConfigureAwait(false);
+			Start();
+		});
+
+		string source = newValue
+			? "IPlayerService.GetOwnedGames (~hundreds — profile games only, fast)"
+			: "store dynamicstore (~thousands — includes unplayed F2P, demos, DLC, slow)";
+		return $"OnlyProfileGames is now {newValue} (runtime override). Next discovery uses {source}. Resume point cleared, scan loop restarting.";
+	}
+
 	internal string HandleProtected(string[] args) {
 		PluginConfig cfg;
 		bool? current;
@@ -1170,6 +1234,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
+	private bool EffectiveOnlyProfileGames(PluginConfig cfg) {
+		lock (_gate) {
+			return _onlyProfileGamesOverride ?? cfg.OnlyProfileGames;
+		}
+	}
+
 	private uint EffectiveScanInterval(PluginConfig cfg) {
 		uint? overrideValue;
 		lock (_gate) { overrideValue = _scanIntervalHoursOverride; }
@@ -1211,7 +1281,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		uint? cached = FindByName(input);
 		if (cached.HasValue) { return cached; }
 
-		IReadOnlyDictionary<uint, string>? owned = await GameDiscovery.GetOwnedGamesAsync(_bot).ConfigureAwait(false);
+		IReadOnlyDictionary<uint, string>? owned = await GameDiscovery.GetProfileGamesAsync(_bot).ConfigureAwait(false);
 		if (owned is not null) {
 			lock (_gate) {
 				foreach (KeyValuePair<uint, string> kvp in owned) {
@@ -1277,6 +1347,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				}
 				if (TryGetProp(state, "attemptProtectedOverride", out JsonElement prot)) {
 					if (prot.ValueKind == JsonValueKind.True) { _attemptProtectedOverride = true; } else if (prot.ValueKind == JsonValueKind.False) { _attemptProtectedOverride = false; }
+				}
+				if (TryGetProp(state, "onlyProfileGamesOverride", out JsonElement opg)) {
+					if (opg.ValueKind == JsonValueKind.True) { _onlyProfileGamesOverride = true; } else if (opg.ValueKind == JsonValueKind.False) { _onlyProfileGamesOverride = false; }
 				}
 				if (TryGetProp(state, "resumeFromAppID", out JsonElement resEl)
 					&& resEl.ValueKind == JsonValueKind.Number
@@ -1362,6 +1435,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string protectedPart = _attemptProtectedOverride.HasValue
 			? ",\"attemptProtectedOverride\":" + (_attemptProtectedOverride.Value ? "true" : "false")
 			: "";
+		string profilePart = _onlyProfileGamesOverride.HasValue
+			? ",\"onlyProfileGamesOverride\":" + (_onlyProfileGamesOverride.Value ? "true" : "false")
+			: "";
 		string resumePart = _resumeFromAppID.HasValue
 			? ",\"resumeFromAppID\":" + _resumeFromAppID.Value.ToString(CultureInfo.InvariantCulture)
 			: "";
@@ -1382,7 +1458,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string lastScannedMap = SerializeUintDateMap(_lastScannedAt);
 
 		string json = "{\"blacklist\":[" + blacklistCsv + "]"
-			+ intervalPart + enabledPart + protectedPart + resumePart + totalPart + lastPart
+			+ intervalPart + enabledPart + protectedPart + profilePart + resumePart + totalPart + lastPart
 			+ scansAllPart + scanSecsPart + uptimePart
 			+ ",\"allTimeUnlocked\":" + allTimeMap
 			+ ",\"schemaTotal\":" + schemaTotalMap
@@ -1484,6 +1560,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		&& a.InitialDelaySeconds == b.InitialDelaySeconds
 		&& a.PerGameDelayMilliseconds == b.PerGameDelayMilliseconds
 		&& a.AttemptProtectedAchievements == b.AttemptProtectedAchievements
+		&& a.OnlyProfileGames == b.OnlyProfileGames
 		&& a.Blacklist.SetEquals(b.Blacklist);
 
 	private sealed class ScanResult {

@@ -28,6 +28,12 @@ public sealed class PluginConfig {
 	// When false, protected bits are skipped client-side and never sent.
 	public bool AttemptProtectedAchievements { get; set; } = false;
 
+	// Discovery mode. true = IPlayerService.GetOwnedGames (~570 entries, the
+	// "Games X" count on the public profile). false = store dynamicstore
+	// (~thousands, includes free games never played, demos, DLC, etc. —
+	// catches achievements on titles that aren't in the profile games list).
+	public bool OnlyProfileGames { get; set; } = true;
+
 	// AppIDs / names that are never touched.
 	public HashSet<uint> Blacklist { get; set; } = [];
 
@@ -59,6 +65,9 @@ public sealed class PluginConfig {
 					break;
 				case "AttemptProtectedAchievements":
 					if (prop.Value.ValueKind == JsonValueKind.True) { config.AttemptProtectedAchievements = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AttemptProtectedAchievements = false; }
+					break;
+				case "OnlyProfileGames":
+					if (prop.Value.ValueKind == JsonValueKind.True) { config.OnlyProfileGames = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.OnlyProfileGames = false; }
 					break;
 				case "Blacklist":
 					config.Blacklist = ParseUintArray(prop.Value);
