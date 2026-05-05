@@ -18,7 +18,7 @@ public sealed class PluginConfig {
 	// Always full library — IPlayerService.GetOwnedGames doesn't include
 	// free games never played, so we go through the dynamicstore endpoint
 	// (every AppID the account has access to).
-	public uint ScanIntervalDays { get; set; } = 1;
+	public uint ScanIntervalDays { get; set; } = 7;
 
 	// Wait after login before kicking off the first scan.
 	public uint InitialDelaySeconds { get; set; } = 60;
