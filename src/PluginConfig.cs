@@ -31,6 +31,13 @@ public sealed class PluginConfig {
 	// When false, protected bits are skipped client-side and never sent.
 	public bool AttemptProtectedAchievements { get; set; } = false;
 
+	// When true (default), defer per-game scan iterations while ASF's built-in
+	// card farmer is actively farming a game (CardsFarmer.NowFarming). The
+	// scan picks up exactly where it left off as soon as farming finishes.
+	// Set false to scan unconditionally — Play(appID) calls during the scan
+	// will knock the card-farming game out of the play slot mid-drop.
+	public bool AllowCardFarming { get; set; } = true;
+
 	// AppIDs / names that are never touched.
 	public HashSet<uint> Blacklist { get; set; } = [];
 
@@ -62,6 +69,9 @@ public sealed class PluginConfig {
 					break;
 				case "AttemptProtectedAchievements":
 					if (prop.Value.ValueKind == JsonValueKind.True) { config.AttemptProtectedAchievements = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AttemptProtectedAchievements = false; }
+					break;
+				case "AllowCardFarming":
+					if (prop.Value.ValueKind == JsonValueKind.True) { config.AllowCardFarming = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AllowCardFarming = false; }
 					break;
 				case "Blacklist":
 					config.Blacklist = ParseUintArray(prop.Value);

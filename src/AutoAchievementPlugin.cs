@@ -126,6 +126,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 			"AABLACKLISTREMOVE" or "AABLRM" or "AAUNBLOCK" => runtime.HandleRemoveBlacklist(tail),
 			"AAINTERVAL" or "AAINT" => runtime.HandleInterval(tail),
 			"AAPROTECTED" or "AAPROT" => runtime.HandleProtected(tail),
+			"AACARDS" => runtime.HandleAllowCardFarmingToggle(),
 			"AACANCEL" or "AASTOP" => runtime.HandleCancel(),
 			"AATOGGLE" => runtime.HandleToggle(),
 			"AAHELP" => HelpText(),
@@ -155,6 +156,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
 		"  aainterval [bot] <days>                   — change scan interval in days (0 to reset to default)",
 		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
+		"  aacards [bot]                             — toggle AllowCardFarming (yield play slot to ASF card farmer)",
 		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
 		"  aahelp                                    — this message"
 	});
@@ -176,6 +178,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private uint? _scanIntervalDaysOverride;
 	private bool? _enabledOverride;
 	private bool? _attemptProtectedOverride;
+	private bool? _allowCardFarmingOverride;
 	private DateTime? _lastScanCancelledAt;
 	private CancellationTokenSource? _scanCancelCts;
 	private long _totalAchievementsUnlocked;
@@ -230,7 +233,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		_bot.ArchiLogger.LogGenericInfo(
 			$"AutoAchievement config: Enabled={IsEnabled(config)}, ScanIntervalDays={EffectiveScanIntervalDays(config)}, "
 			+ $"InitialDelaySeconds={config.InitialDelaySeconds}, PerGameDelayMs={config.PerGameDelayMilliseconds}, "
-			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, "
+			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, AllowCardFarming={EffectiveAllowCardFarming(config)}, "
 			+ $"ConfigBlacklist={config.Blacklist.Count}, PersistentBlacklist={_persistentBlacklist.Count}"
 		);
 
@@ -551,6 +554,16 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					if (token.IsCancellationRequested) { completedAll = false; break; }
 				}
 
+				// Coexist with ASF's card farmer in AllowCardFarming mode.
+				// Calling Play(appID) for our scan would knock the card-
+				// farming game out of the play slot mid-drop, so we wait
+				// for the farmer to finish before processing this game.
+				// Picks back up at the same AppID once farming completes.
+				if (IsCardFarmingActive(cfg)) {
+					await WaitWhileCardFarmingAsync(displayIdx, targets.Count, appID, token).ConfigureAwait(false);
+					if (token.IsCancellationRequested) { completedAll = false; break; }
+				}
+
 				try {
 					GameScanOutcome outcome = await ScanGameAsync(appID, cfg, token).ConfigureAwait(false);
 					result.GamesProcessed++;
@@ -782,6 +795,37 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
+	// Pauses the scan while ASF's card farmer is using the play slot for
+	// its own farming. Polls every 15s — the farmer typically finishes a
+	// single game in 5-30 minutes, so we'd otherwise idle here for a while.
+	private async Task WaitWhileCardFarmingAsync(int idx, int total, uint appID, CancellationToken token) {
+		DateTime? blockedSince = null;
+		while (!token.IsCancellationRequested) {
+			bool farming;
+			try { farming = _bot.CardsFarmer.NowFarming; } catch { farming = false; }
+			if (!farming) { break; }
+
+			if (blockedSince is null) {
+				blockedSince = DateTime.UtcNow;
+				_bot.ArchiLogger.LogGenericInfo(
+					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) — ASF card farmer is active. Will resume at this game when farming completes."
+				);
+			}
+			try {
+				await Task.Delay(TimeSpan.FromSeconds(15), token).ConfigureAwait(false);
+			} catch (OperationCanceledException) {
+				return;
+			}
+		}
+
+		if (blockedSince.HasValue && !token.IsCancellationRequested) {
+			TimeSpan blockedFor = DateTime.UtcNow - blockedSince.Value;
+			_bot.ArchiLogger.LogGenericInfo(
+				$"AutoAchievement: card farmer finished, resuming scan at {idx}/{total} ({FormatID(appID)}) (paused {FormatDuration(blockedFor)})."
+			);
+		}
+	}
+
 	private void RecordSchemaSnapshot(uint appID, int total, int alreadyUnlocked) {
 		lock (_gate) {
 			_lastScannedAt[appID] = DateTime.UtcNow;
@@ -913,10 +957,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add($"  Scan interval: every {EffectiveScanIntervalDays(cfg)} day(s){(intervalOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Initial delay: {cfg.InitialDelaySeconds}s, per-game delay: {cfg.PerGameDelayMilliseconds}ms");
 		bool? protOverride;
+		bool? acfOverride;
 		lock (_gate) {
 			protOverride = _attemptProtectedOverride;
+			acfOverride = _allowCardFarmingOverride;
 		}
 		lines.Add($"  AttemptProtectedAchievements: {EffectiveAttemptProtected(cfg)}{(protOverride.HasValue ? " (runtime override)" : "")}");
+		lines.Add($"  AllowCardFarming: {EffectiveAllowCardFarming(cfg)}{(acfOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Achievements unlocked: {sessionUnlocked} (this session) / {total} (all-time)");
 		lines.Add($"  Scans completed: {scansSession} (this session) / {scansAll} (all-time, total scan time {FormatDuration(TimeSpan.FromSeconds(scanSecsAll))})");
 
@@ -1253,6 +1300,23 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return $"Enabled = {newValue} (runtime override). Scan loop {(newValue ? "starting" : "stopping")} now.";
 	}
 
+	internal string HandleAllowCardFarmingToggle() {
+		PluginConfig cfg;
+		lock (_gate) { cfg = _config; }
+
+		bool current = EffectiveAllowCardFarming(cfg);
+		bool newValue = !current;
+
+		lock (_gate) {
+			_allowCardFarmingOverride = newValue;
+			SavePersistentState();
+		}
+
+		return newValue
+			? "AllowCardFarming is now true (runtime override). Scans will pause when ASF's card farmer is active and resume when it finishes."
+			: "AllowCardFarming is now false (runtime override). Scans will run unconditionally and may interrupt card farming.";
+	}
+
 	internal string HandleProtected(string[] args) {
 		PluginConfig cfg;
 		bool? current;
@@ -1308,6 +1372,26 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private bool EffectiveAttemptProtected(PluginConfig cfg) {
 		lock (_gate) {
 			return _attemptProtectedOverride ?? cfg.AttemptProtectedAchievements;
+		}
+	}
+
+	private bool EffectiveAllowCardFarming(PluginConfig cfg) {
+		lock (_gate) {
+			return _allowCardFarmingOverride ?? cfg.AllowCardFarming;
+		}
+	}
+
+	// Returns true iff (a) we're in coexist mode (AllowCardFarming=true)
+	// AND (b) ASF's card farmer is actively farming a game right now.
+	// In that state ScanLibraryAsync's per-game loop should defer before
+	// calling Play(appID) — otherwise we'd kick the card-farming game
+	// out of the play slot mid-drop.
+	private bool IsCardFarmingActive(PluginConfig cfg) {
+		if (!EffectiveAllowCardFarming(cfg)) { return false; }
+		try {
+			return _bot.CardsFarmer.NowFarming;
+		} catch {
+			return false;
 		}
 	}
 
@@ -1449,6 +1533,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				if (TryGetProp(state, "attemptProtectedOverride", out JsonElement prot)) {
 					if (prot.ValueKind == JsonValueKind.True) { _attemptProtectedOverride = true; } else if (prot.ValueKind == JsonValueKind.False) { _attemptProtectedOverride = false; }
 				}
+				if (TryGetProp(state, "allowCardFarmingOverride", out JsonElement acf)) {
+					if (acf.ValueKind == JsonValueKind.True) { _allowCardFarmingOverride = true; } else if (acf.ValueKind == JsonValueKind.False) { _allowCardFarmingOverride = false; }
+				}
 				if (TryGetProp(state, "resumeFromAppID", out JsonElement resEl)
 					&& resEl.ValueKind == JsonValueKind.Number
 					&& resEl.TryGetUInt32(out uint resId)
@@ -1540,6 +1627,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string protectedPart = _attemptProtectedOverride.HasValue
 			? ",\"attemptProtectedOverride\":" + (_attemptProtectedOverride.Value ? "true" : "false")
 			: "";
+		string allowFarmPart = _allowCardFarmingOverride.HasValue
+			? ",\"allowCardFarmingOverride\":" + (_allowCardFarmingOverride.Value ? "true" : "false")
+			: "";
 		string resumePart = _resumeFromAppID.HasValue
 			? ",\"resumeFromAppID\":" + _resumeFromAppID.Value.ToString(CultureInfo.InvariantCulture)
 			: "";
@@ -1563,7 +1653,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string lastScannedMap = SerializeUintDateMap(_lastScannedAt);
 
 		string json = "{\"blacklist\":[" + blacklistCsv + "]"
-			+ intervalPart + enabledPart + protectedPart + resumePart + totalPart + lastPart + lastCancelPart
+			+ intervalPart + enabledPart + protectedPart + allowFarmPart + resumePart + totalPart + lastPart + lastCancelPart
 			+ scansAllPart + scanSecsPart + uptimePart
 			+ ",\"allTimeUnlocked\":" + allTimeMap
 			+ ",\"schemaTotal\":" + schemaTotalMap
@@ -1665,6 +1755,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		&& a.InitialDelaySeconds == b.InitialDelaySeconds
 		&& a.PerGameDelayMilliseconds == b.PerGameDelayMilliseconds
 		&& a.AttemptProtectedAchievements == b.AttemptProtectedAchievements
+		&& a.AllowCardFarming == b.AllowCardFarming
 		&& a.Blacklist.SetEquals(b.Blacklist);
 
 	private sealed class ScanResult {
