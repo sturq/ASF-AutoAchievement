@@ -331,7 +331,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					if (elapsed < interval) {
 						TimeSpan remaining = interval - elapsed;
 						_bot.ArchiLogger.LogGenericInfo(
-							$"AutoAchievement: last scan ended {FormatDuration(elapsed)} ago, next scan in {FormatDaysHours(remaining)}."
+							$"AutoAchievement: last scan ended {FormatDuration(elapsed)} ago, next scan in {FormatCountdown(remaining)}."
 						);
 						try {
 							await Task.Delay(remaining, token).ConfigureAwait(false);
@@ -394,7 +394,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					}
 					if (userCancelled) {
 						_bot.ArchiLogger.LogGenericInfo(
-							$"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming, next scan in {FormatDaysHours(TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)))}."
+							$"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming, next scan in {FormatCountdown(TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)))}."
 						);
 					} else {
 						LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
@@ -942,7 +942,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			TimeSpan ago = DateTime.UtcNow - lastEnded.Value;
 			TimeSpan nextIn = TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)) - ago;
 			if (nextIn < TimeSpan.Zero) { nextIn = TimeSpan.Zero; }
-			lines.Add($"  Last scan: {FormatDuration(ago)} ago ({lastLabel}), next in: {FormatDaysHours(nextIn)}");
+			lines.Add($"  Last scan: {FormatDuration(ago)} ago ({lastLabel}), next in: {FormatCountdown(nextIn)}");
 		} else {
 			lines.Add("  Last scan: never (waiting for first run)");
 		}
@@ -1358,17 +1358,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return ((int) d.TotalSeconds).ToString(CultureInfo.InvariantCulture) + "s";
 	}
 
-	// Always-days-and-hours format for "time until next scan" displays.
-	// Scan interval is configured in days, so users want the countdown in
-	// the same unit even when it's under 24h ("0d 5h" beats "5h 12m" for
-	// glanceability). Used by aashow's "next in" and the loop's cooldown
-	// log line, NOT by FormatDuration's other callers (uptime, elapsed,
-	// etc.) where hours+minutes is the better resolution.
-	private static string FormatDaysHours(TimeSpan d) {
+	// Full-resolution countdown for "time until next scan" displays — always
+	// "Xd Yh Zm Ws" so glancing at aashow gives an exact figure regardless
+	// of magnitude. Used by aashow's "next in" and the loop's cooldown log
+	// line, NOT by FormatDuration's other callers (uptime, scan elapsed,
+	// etc.) where the auto-collapsing format is fine.
+	private static string FormatCountdown(TimeSpan d) {
 		if (d < TimeSpan.Zero) { d = TimeSpan.Zero; }
 		int days = (int) d.TotalDays;
 		int hours = d.Hours;
-		return days.ToString(CultureInfo.InvariantCulture) + "d " + hours.ToString(CultureInfo.InvariantCulture) + "h";
+		int mins = d.Minutes;
+		int secs = d.Seconds;
+		return days.ToString(CultureInfo.InvariantCulture) + "d "
+			+ hours.ToString(CultureInfo.InvariantCulture) + "h "
+			+ mins.ToString(CultureInfo.InvariantCulture) + "m "
+			+ secs.ToString(CultureInfo.InvariantCulture) + "s";
 	}
 
 	private async Task<uint?> ResolveAppIDAsync(string input) {
