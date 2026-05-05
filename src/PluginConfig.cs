@@ -15,7 +15,10 @@ public sealed class PluginConfig {
 	public bool Enabled { get; set; } = true;
 
 	// How often to re-scan the entire library for new achievements.
-	public uint ScanIntervalHours { get; set; } = 12;
+	// Always full library — IPlayerService.GetOwnedGames doesn't include
+	// free games never played, so we go through the dynamicstore endpoint
+	// (every AppID the account has access to).
+	public uint ScanIntervalDays { get; set; } = 1;
 
 	// Wait after login before kicking off the first scan.
 	public uint InitialDelaySeconds { get; set; } = 60;
@@ -27,12 +30,6 @@ public sealed class PluginConfig {
 	// Steam normally rejects these — off by default to keep the log quiet.
 	// When false, protected bits are skipped client-side and never sent.
 	public bool AttemptProtectedAchievements { get; set; } = false;
-
-	// Discovery mode. true = IPlayerService.GetOwnedGames (~570 entries, the
-	// "Games X" count on the public profile). false = store dynamicstore
-	// (~thousands, includes free games never played, demos, DLC, etc. —
-	// catches achievements on titles that aren't in the profile games list).
-	public bool OnlyProfileGames { get; set; } = true;
 
 	// AppIDs / names that are never touched.
 	public HashSet<uint> Blacklist { get; set; } = [];
@@ -54,8 +51,8 @@ public sealed class PluginConfig {
 				case "Enabled":
 					if (prop.Value.ValueKind == JsonValueKind.True) { config.Enabled = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.Enabled = false; }
 					break;
-				case "ScanIntervalHours":
-					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint scan) && scan > 0) { config.ScanIntervalHours = scan; }
+				case "ScanIntervalDays":
+					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint days) && days > 0) { config.ScanIntervalDays = days; }
 					break;
 				case "InitialDelaySeconds":
 					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint delay)) { config.InitialDelaySeconds = delay; }
@@ -65,9 +62,6 @@ public sealed class PluginConfig {
 					break;
 				case "AttemptProtectedAchievements":
 					if (prop.Value.ValueKind == JsonValueKind.True) { config.AttemptProtectedAchievements = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.AttemptProtectedAchievements = false; }
-					break;
-				case "OnlyProfileGames":
-					if (prop.Value.ValueKind == JsonValueKind.True) { config.OnlyProfileGames = true; } else if (prop.Value.ValueKind == JsonValueKind.False) { config.OnlyProfileGames = false; }
 					break;
 				case "Blacklist":
 					config.Blacklist = ParseUintArray(prop.Value);

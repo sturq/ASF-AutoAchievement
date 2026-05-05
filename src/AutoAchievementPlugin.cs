@@ -18,7 +18,7 @@ namespace ASF.AutoAchievement;
 /// Auto-achievement plugin. For every owned game (minus the blacklist), the
 /// plugin briefly enters "playing" state, fetches the achievement schema via
 /// ClientGetUserStats, and pushes back a ClientStoreUserStats2 with every
-/// available bit set. Re-runs every ScanIntervalHours to pick up newly added
+/// available bit set. Re-runs every ScanIntervalDays to pick up newly added
 /// achievements after game updates.
 /// </summary>
 [Export(typeof(IPlugin))]
@@ -126,7 +126,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 			"AABLACKLISTREMOVE" or "AABLRM" or "AAUNBLOCK" => runtime.HandleRemoveBlacklist(tail),
 			"AAINTERVAL" or "AAINT" => runtime.HandleInterval(tail),
 			"AAPROTECTED" or "AAPROT" => runtime.HandleProtected(tail),
-			"AAPROFILE" or "AAPROFILEGAMES" or "AAONLYPROFILE" => runtime.HandleProfileGamesToggle(),
+			"AACANCEL" or "AASTOP" => runtime.HandleCancel(),
 			"AATOGGLE" => runtime.HandleToggle(),
 			"AAHELP" => HelpText(),
 			_ => null
@@ -154,7 +154,8 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
 		"  aainterval [bot] <hours>                  — change scan interval (0 to reset)",
 		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
-		"  aaprofile [bot]                           — toggle OnlyProfileGames (profile games vs full dynamicstore)",
+		"  aanow [bot]                               — same as aascan, runs a scan immediately",
+		"  aacancel [bot]                            — cancel the in-flight scan and let AutoIdle take over",
 		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
 		"  aahelp                                    — this message"
 	});
@@ -173,10 +174,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private CancellationTokenSource? _cts;
 	private Task? _loop;
 	private DateTime? _lastScanCompletedAt;
-	private uint? _scanIntervalHoursOverride;
+	private uint? _scanIntervalDaysOverride;
 	private bool? _enabledOverride;
 	private bool? _attemptProtectedOverride;
-	private bool? _onlyProfileGamesOverride;
+	private DateTime? _lastScanCancelledAt;
+	private CancellationTokenSource? _scanCancelCts;
 	private long _totalAchievementsUnlocked;
 	private bool _persistentLoaded;
 
@@ -227,9 +229,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		_bot.ArchiLogger.LogGenericInfo(
-			$"AutoAchievement config: Enabled={IsEnabled(config)}, ScanIntervalHours={EffectiveScanInterval(config)}, "
+			$"AutoAchievement config: Enabled={IsEnabled(config)}, ScanIntervalDays={EffectiveScanIntervalDays(config)}, "
 			+ $"InitialDelaySeconds={config.InitialDelaySeconds}, PerGameDelayMs={config.PerGameDelayMilliseconds}, "
-			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, OnlyProfileGames={EffectiveOnlyProfileGames(config)}, "
+			+ $"AttemptProtected={EffectiveAttemptProtected(config)}, "
 			+ $"ConfigBlacklist={config.Blacklist.Count}, PersistentBlacklist={_persistentBlacklist.Count}"
 		);
 
@@ -313,26 +315,24 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			while (!token.IsCancellationRequested) {
 				lock (_gate) { cfg = _config; }
 
-				// Cooldown check: if a cycle completed less than the configured
-				// interval ago AND we have no pending resume point from an
-				// earlier interrupted scan, sleep the remainder of the interval
-				// instead of starting a new cycle. Without this, every
-				// disconnect/reconnect (LoggedInElsewhere when the user opens
-				// Steam, etc.) would respawn ScanLoopAsync and immediately run
-				// a fresh full scan, ignoring the "once per interval" intent.
-				DateTime? lastCompleted;
+				// Cooldown check: if a scan ended (completed OR cancelled by
+				// user) less than the configured interval ago AND we have no
+				// pending resume point from an earlier interrupted scan, sleep
+				// the remainder of the interval instead of starting a new
+				// cycle. Without this, disconnect/reconnect events would
+				// respawn ScanLoopAsync and immediately run a fresh full
+				// scan, ignoring the "once per interval" intent. Also,
+				// !aacancel would be useless if the loop just retried in 30s.
+				DateTime? lastEnded = EffectiveLastScanEnded();
 				bool hasResumePoint;
-				lock (_gate) {
-					lastCompleted = _lastScanCompletedAt;
-					hasResumePoint = _resumeFromAppID.HasValue;
-				}
-				if (lastCompleted.HasValue && !hasResumePoint) {
-					TimeSpan interval = TimeSpan.FromHours(EffectiveScanInterval(cfg));
-					TimeSpan elapsed = DateTime.UtcNow - lastCompleted.Value;
+				lock (_gate) { hasResumePoint = _resumeFromAppID.HasValue; }
+				if (lastEnded.HasValue && !hasResumePoint) {
+					TimeSpan interval = TimeSpan.FromDays(EffectiveScanIntervalDays(cfg));
+					TimeSpan elapsed = DateTime.UtcNow - lastEnded.Value;
 					if (elapsed < interval) {
 						TimeSpan remaining = interval - elapsed;
 						_bot.ArchiLogger.LogGenericInfo(
-							$"AutoAchievement: last cycle completed {FormatDuration(elapsed)} ago, next scan in {FormatDuration(remaining)}."
+							$"AutoAchievement: last scan ended {FormatDuration(elapsed)} ago, next scan in {FormatDuration(remaining)}."
 						);
 						try {
 							await Task.Delay(remaining, token).ConfigureAwait(false);
@@ -343,12 +343,44 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					}
 				}
 
+				// Per-scan cancellation token: !aacancel signals this without
+				// killing the whole loop. Linked with the loop's own token so
+				// either source ends the scan. Mutex against !aanow: if a
+				// manual scan is already running, skip this iteration with a
+				// short retry — racing two scans would have them both calling
+				// Play(appID) on different games and stomping each other's
+				// stat writes.
+				CancellationTokenSource scanCts = new();
+				bool gotSlot;
+				lock (_gate) {
+					if (_scanCancelCts is not null) {
+						gotSlot = false;
+					} else {
+						_scanCancelCts = scanCts;
+						gotSlot = true;
+					}
+				}
+				if (!gotSlot) {
+					scanCts.Dispose();
+					try {
+						await Task.Delay(TimeSpan.FromSeconds(30), token).ConfigureAwait(false);
+					} catch (OperationCanceledException) {
+						break;
+					}
+					continue;
+				}
+				using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token, scanCts.Token);
+
+				_bot.ArchiLogger.LogGenericInfo("AutoAchievement: starting scan cycle.");
+
 				DateTime scanStartedAt = DateTime.UtcNow;
 				bool fullPass = false;
+				bool userCancelled = false;
 				try {
-					ScanResult result = await ScanLibraryAsync(cfg, token).ConfigureAwait(false);
+					ScanResult result = await ScanLibraryAsync(cfg, linkedCts.Token).ConfigureAwait(false);
 					long elapsedSecs = (long) (DateTime.UtcNow - scanStartedAt).TotalSeconds;
 					fullPass = result.FullLibraryPass;
+					userCancelled = scanCts.IsCancellationRequested && !token.IsCancellationRequested;
 					lock (_gate) {
 						_totalAchievementsUnlocked += result.AchievementsUnlocked;
 						_scanSecondsAllTime += elapsedSecs;
@@ -356,24 +388,46 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							_lastScanCompletedAt = DateTime.UtcNow;
 							_scansCompletedAllTime++;
 							_scansCompletedSession++;
+						} else if (userCancelled) {
+							_lastScanCancelledAt = DateTime.UtcNow;
 						}
 						SavePersistentState();
 					}
-					LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
+					if (userCancelled) {
+						_bot.ArchiLogger.LogGenericInfo(
+							$"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming, next scan in {FormatDuration(TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)))}."
+						);
+					} else {
+						LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
+					}
 				} catch (OperationCanceledException) {
-					break;
+					if (token.IsCancellationRequested) { break; }
+					// Loop token alive → must have been a user cancel that
+					// raced past the IsCancellationRequested check.
+					userCancelled = true;
+					lock (_gate) {
+						_lastScanCancelledAt = DateTime.UtcNow;
+						SavePersistentState();
+					}
+					_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan cancelled by user — AutoIdle resuming.");
 				} catch (Exception ex) {
 					_bot.ArchiLogger.LogGenericException(ex);
+				} finally {
+					lock (_gate) {
+						if (ReferenceEquals(_scanCancelCts, scanCts)) { _scanCancelCts = null; }
+					}
+					scanCts.Dispose();
 				}
 
-				// Only wait the full scan interval after an actual full library
-				// pass. Partial runs (resumed-from-prior-session, empty-pool
-				// returns, mid-run exceptions) loop straight into a fresh scan
-				// instead of sleeping for a day with nothing to do — the resume
-				// point is already cleared by ScanLibraryAsync's finally block,
-				// so the next iteration starts cleanly from index 0.
-				TimeSpan waitFor = fullPass
-					? TimeSpan.FromHours(EffectiveScanInterval(cfg))
+				// Wait policy after the scan ends:
+				//   - Completed full pass: full interval (cooldown check at
+				//     loop top will see _lastScanCompletedAt and wait).
+				//   - User-cancelled: same — _lastScanCancelledAt was just
+				//     set, cooldown check honours it.
+				//   - Partial / errored (Steam refused, mid-run exception):
+				//     short breather then the cooldown check decides.
+				TimeSpan waitFor = (fullPass || userCancelled)
+					? TimeSpan.FromDays(EffectiveScanIntervalDays(cfg))
 					: TimeSpan.FromSeconds(30);
 				try {
 					await Task.Delay(waitFor, token).ConfigureAwait(false);
@@ -393,10 +447,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private async Task<ScanResult> ScanLibraryAsync(PluginConfig cfg, CancellationToken token) {
 		ScanResult result = new();
 
-		// Always pull the profile-games list at least once per scan so we
-		// have display names for log output. Even when OnlyProfileGames is
-		// false we still want names where they exist; AppIDs only present
-		// in dynamicstore (DLC/demos/unplayed F2P) just show as "AppID N".
+		// Pull the profile-games list to populate the name cache for nice
+		// log output. AppIDs only present in dynamicstore (DLC, demos,
+		// unplayed F2P games) won't have a name and just log as "AppID N".
 		IReadOnlyDictionary<uint, string>? profile = await GameDiscovery.GetProfileGamesAsync(_bot).ConfigureAwait(false);
 		if (profile is not null) {
 			lock (_gate) {
@@ -408,26 +461,21 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 		}
 
+		// Target set is always the full dynamicstore — every AppID the bot
+		// has access to, which catches achievements on never-played free
+		// games, demos that have stat schemas, etc. If dynamicstore fails
+		// we fall back to profile games for this cycle rather than returning
+		// empty (otherwise an empty scan would have to be classified as
+		// either "completed" or "errored" and burn the wrong amount of time).
 		HashSet<uint> targetSet;
-		if (EffectiveOnlyProfileGames(cfg)) {
-			if (profile is null || profile.Count == 0) {
-				return result;
-			}
+		IReadOnlyCollection<uint> all = await GameDiscovery.GetAllOwnedAppIDsAsync(_bot).ConfigureAwait(false);
+		if (all.Count > 0) {
+			targetSet = [.. all];
+		} else if (profile is not null && profile.Count > 0) {
+			_bot.ArchiLogger.LogGenericWarning("AutoAchievement: dynamicstore returned empty, falling back to profile-only games for this cycle.");
 			targetSet = [.. profile.Keys];
 		} else {
-			IReadOnlyCollection<uint> all = await GameDiscovery.GetAllOwnedAppIDsAsync(_bot).ConfigureAwait(false);
-			if (all.Count == 0) {
-				// Dynamicstore failed; fall back to profile games rather than
-				// returning empty (otherwise an empty scan would count as a
-				// completed cycle and burn a 24h slot).
-				if (profile is null || profile.Count == 0) {
-					return result;
-				}
-				targetSet = [.. profile.Keys];
-				_bot.ArchiLogger.LogGenericWarning("AutoAchievement: dynamicstore returned empty, falling back to profile-only games for this cycle.");
-			} else {
-				targetSet = [.. all];
-			}
+			return result;
 		}
 
 		HashSet<uint> blacklist = EffectiveBlacklist(cfg);
@@ -840,11 +888,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		int scansSession;
 		long scanSecsAll;
 		int sessionUnlocked;
+		DateTime? lastCancelled;
 		lock (_gate) {
 			cfg = _config;
 			last = _lastScanCompletedAt;
+			lastCancelled = _lastScanCancelledAt;
 			total = _totalAchievementsUnlocked;
-			intervalOverride = _scanIntervalHoursOverride;
+			intervalOverride = _scanIntervalDaysOverride;
 			enabledOverride = _enabledOverride;
 			blacklist = EffectiveBlacklist(cfg);
 			scanGame = _currentScanGameID;
@@ -861,16 +911,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		List<string> lines = [];
 		lines.Add($"AutoAchievement status for {_bot.BotName}:");
 		lines.Add($"  Enabled: {IsEnabled(cfg)}{(enabledOverride.HasValue ? " (runtime override)" : "")}");
-		lines.Add($"  Scan interval: every {EffectiveScanInterval(cfg)} h{(intervalOverride.HasValue ? " (runtime override)" : "")}");
+		lines.Add($"  Scan interval: every {EffectiveScanIntervalDays(cfg)} day(s){(intervalOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Initial delay: {cfg.InitialDelaySeconds}s, per-game delay: {cfg.PerGameDelayMilliseconds}ms");
 		bool? protOverride;
-		bool? opgOverride;
 		lock (_gate) {
 			protOverride = _attemptProtectedOverride;
-			opgOverride = _onlyProfileGamesOverride;
 		}
 		lines.Add($"  AttemptProtectedAchievements: {EffectiveAttemptProtected(cfg)}{(protOverride.HasValue ? " (runtime override)" : "")}");
-		lines.Add($"  OnlyProfileGames: {EffectiveOnlyProfileGames(cfg)}{(opgOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Achievements unlocked: {sessionUnlocked} (this session) / {total} (all-time)");
 		lines.Add($"  Scans completed: {scansSession} (this session) / {scansAll} (all-time, total scan time {FormatDuration(TimeSpan.FromSeconds(scanSecsAll))})");
 
@@ -880,11 +927,23 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lines.Add($"  Currently scanning: {scanIdx}/{scanTotal} — {current}, started {FormatDuration(elapsed)} ago");
 		}
 
-		if (last.HasValue) {
-			TimeSpan ago = DateTime.UtcNow - last.Value;
-			TimeSpan nextIn = TimeSpan.FromHours(EffectiveScanInterval(cfg)) - ago;
+		// Show whichever scan-end event is most recent so "next in" matches
+		// the actual cooldown the loop is honouring.
+		DateTime? lastEnded = null;
+		string lastLabel = "completed";
+		if (last.HasValue && lastCancelled.HasValue) {
+			if (lastCancelled.Value > last.Value) { lastEnded = lastCancelled; lastLabel = "cancelled"; }
+			else { lastEnded = last; lastLabel = "completed"; }
+		} else if (last.HasValue) {
+			lastEnded = last; lastLabel = "completed";
+		} else if (lastCancelled.HasValue) {
+			lastEnded = lastCancelled; lastLabel = "cancelled";
+		}
+		if (lastEnded.HasValue) {
+			TimeSpan ago = DateTime.UtcNow - lastEnded.Value;
+			TimeSpan nextIn = TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)) - ago;
 			if (nextIn < TimeSpan.Zero) { nextIn = TimeSpan.Zero; }
-			lines.Add($"  Last scan: {FormatDuration(ago)} ago, next in: {FormatDuration(nextIn)}");
+			lines.Add($"  Last scan: {FormatDuration(ago)} ago ({lastLabel}), next in: {FormatDuration(nextIn)}");
 		} else {
 			lines.Add("  Last scan: never (waiting for first run)");
 		}
@@ -1001,23 +1060,60 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			return "AutoAchievement is disabled for this bot.";
 		}
 
-		using CancellationTokenSource cts = new(TimeSpan.FromHours(6));
-		DateTime startedAt = DateTime.UtcNow;
-		ScanResult result = await ScanLibraryAsync(cfg, cts.Token).ConfigureAwait(false);
-		TimeSpan elapsed = DateTime.UtcNow - startedAt;
+		// Register the CTS as _scanCancelCts so !aacancel can stop this run
+		// the same way it stops the loop's scheduled scan. Reject if a scan
+		// is already in flight (loop or another !aanow) — racing two
+		// scans would have them both calling Play(appID) and stomping on
+		// each other's stat writes.
+		CancellationTokenSource cts = new(TimeSpan.FromHours(6));
 		lock (_gate) {
-			_totalAchievementsUnlocked += result.AchievementsUnlocked;
-			_scanSecondsAllTime += (long) elapsed.TotalSeconds;
-			if (result.FullLibraryPass) {
-				_lastScanCompletedAt = DateTime.UtcNow;
-				_scansCompletedAllTime++;
-				_scansCompletedSession++;
+			if (_scanCancelCts is not null) {
+				cts.Dispose();
+				return "AutoAchievement: a scan is already running. Use !aacancel to stop it first.";
 			}
-			SavePersistentState();
+			_scanCancelCts = cts;
 		}
-		LogScanSummary(result, elapsed);
-		string passLabel = result.FullLibraryPass ? "Scan cycle complete" : "Scan interrupted";
-		return $"{passLabel} in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
+
+		_bot.ArchiLogger.LogGenericInfo("AutoAchievement: starting scan cycle (manual !aanow trigger).");
+
+		DateTime startedAt = DateTime.UtcNow;
+		try {
+			ScanResult result = await ScanLibraryAsync(cfg, cts.Token).ConfigureAwait(false);
+			TimeSpan elapsed = DateTime.UtcNow - startedAt;
+			bool userCancelled = cts.IsCancellationRequested && !result.FullLibraryPass;
+			lock (_gate) {
+				_totalAchievementsUnlocked += result.AchievementsUnlocked;
+				_scanSecondsAllTime += (long) elapsed.TotalSeconds;
+				if (result.FullLibraryPass) {
+					_lastScanCompletedAt = DateTime.UtcNow;
+					_scansCompletedAllTime++;
+					_scansCompletedSession++;
+				} else if (userCancelled) {
+					_lastScanCancelledAt = DateTime.UtcNow;
+				}
+				SavePersistentState();
+			}
+			if (userCancelled) {
+				_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming.");
+				return $"Scan cancelled in {FormatDuration(elapsed)}.";
+			}
+			LogScanSummary(result, elapsed);
+			string passLabel = result.FullLibraryPass ? "Scan cycle complete" : "Scan interrupted";
+			return $"{passLabel} in {FormatDuration(elapsed)}. {result.AchievementsUnlocked} achievement(s) unlocked across {result.GamesWithUnlocks} game(s); see ASF log for the per-game breakdown.";
+		} catch (OperationCanceledException) {
+			TimeSpan elapsed = DateTime.UtcNow - startedAt;
+			lock (_gate) {
+				_lastScanCancelledAt = DateTime.UtcNow;
+				SavePersistentState();
+			}
+			_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming.");
+			return $"Scan cancelled in {FormatDuration(elapsed)}.";
+		} finally {
+			lock (_gate) {
+				if (ReferenceEquals(_scanCancelCts, cts)) { _scanCancelCts = null; }
+			}
+			cts.Dispose();
+		}
 	}
 
 	internal async Task<string?> HandleScanGame(string[] args) {
@@ -1102,27 +1198,41 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lock (_gate) { cfg = _config; }
 
 		if (args.Length == 0) {
-			return $"Scan interval: {EffectiveScanInterval(cfg)} h\nUsage: !aainterval <hours>   (0 to reset to default)";
+			return $"Scan interval: {EffectiveScanIntervalDays(cfg)} day(s)\nUsage: !aainterval <days>   (0 to reset to default)";
 		}
 
 		string raw = args[0].Trim();
-		if (!uint.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out uint hours)) {
-			return $"'{raw}' is not a number. Pass a positive integer of hours (or 0 to reset).";
+		if (!uint.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out uint days)) {
+			return $"'{raw}' is not a number. Pass a positive integer of days (or 0 to reset).";
 		}
 
-		if (hours == 0) {
+		if (days == 0) {
 			lock (_gate) {
-				_scanIntervalHoursOverride = null;
+				_scanIntervalDaysOverride = null;
 				SavePersistentState();
 			}
-			return $"Reset. Scan interval is now {cfg.ScanIntervalHours} h.";
+			return $"Reset. Scan interval is now {cfg.ScanIntervalDays} day(s).";
 		}
 
 		lock (_gate) {
-			_scanIntervalHoursOverride = hours;
+			_scanIntervalDaysOverride = days;
 			SavePersistentState();
 		}
-		return $"Scan interval is now {hours} h. The change applies on the next sleep cycle.";
+		return $"Scan interval is now {days} day(s). The change applies on the next sleep cycle.";
+	}
+
+	// Cancel an in-flight scan and let AutoIdle take back the play slot. The
+	// loop's main token stays alive; only the per-scan CTS gets cancelled, so
+	// the loop keeps running and will respect the configured cooldown before
+	// the next scan. If no scan is currently running, this is a no-op.
+	internal string HandleCancel() {
+		CancellationTokenSource? cts;
+		lock (_gate) { cts = _scanCancelCts; }
+		if (cts is null) {
+			return "AutoAchievement: no scan currently running.";
+		}
+		try { cts.Cancel(); } catch (ObjectDisposedException) { }
+		return "AutoAchievement: scan cancellation requested. AutoIdle will resume shortly.";
 	}
 
 	internal string HandleToggle() {
@@ -1142,38 +1252,6 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			if (newValue) { Start(); }
 		});
 		return $"Enabled = {newValue} (runtime override). Scan loop {(newValue ? "starting" : "stopping")} now.";
-	}
-
-	internal string HandleProfileGamesToggle() {
-		PluginConfig cfg;
-		lock (_gate) { cfg = _config; }
-
-		bool current = EffectiveOnlyProfileGames(cfg);
-		bool newValue = !current;
-
-		lock (_gate) {
-			_onlyProfileGamesOverride = newValue;
-			SavePersistentState();
-		}
-
-		// Wipe the resume point — the target list shape is changing, so a
-		// resume AppID from the prior mode might fall in the middle of a
-		// totally different ordered list, or might not even be present.
-		// Cleaner to start the next cycle fresh from index 0.
-		lock (_gate) {
-			_resumeFromAppID = null;
-			SavePersistentState();
-		}
-
-		_ = Task.Run(async () => {
-			await StopAsync().ConfigureAwait(false);
-			Start();
-		});
-
-		string source = newValue
-			? "IPlayerService.GetOwnedGames (~hundreds — profile games only, fast)"
-			: "store dynamicstore (~thousands — includes unplayed F2P, demos, DLC, slow)";
-		return $"OnlyProfileGames is now {newValue} (runtime override). Next discovery uses {source}. Resume point cleared, scan loop restarting.";
 	}
 
 	internal string HandleProtected(string[] args) {
@@ -1234,17 +1312,24 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 	}
 
-	private bool EffectiveOnlyProfileGames(PluginConfig cfg) {
-		lock (_gate) {
-			return _onlyProfileGamesOverride ?? cfg.OnlyProfileGames;
-		}
+	private uint EffectiveScanIntervalDays(PluginConfig cfg) {
+		uint? overrideValue;
+		lock (_gate) { overrideValue = _scanIntervalDaysOverride; }
+		uint chosen = overrideValue ?? cfg.ScanIntervalDays;
+		return Math.Max(1u, chosen);
 	}
 
-	private uint EffectiveScanInterval(PluginConfig cfg) {
-		uint? overrideValue;
-		lock (_gate) { overrideValue = _scanIntervalHoursOverride; }
-		uint chosen = overrideValue ?? cfg.ScanIntervalHours;
-		return Math.Max(1u, chosen);
+	// Last time a scan ended for any reason — completion or user-cancel.
+	// Cooldown gating is anchored on this so that cancelling a scan still
+	// pushes the next one out by a full interval (otherwise the loop would
+	// just retry within seconds and ignore the user's intent).
+	private DateTime? EffectiveLastScanEnded() {
+		lock (_gate) {
+			DateTime? a = _lastScanCompletedAt;
+			DateTime? b = _lastScanCancelledAt;
+			if (a.HasValue && b.HasValue) { return a.Value > b.Value ? a : b; }
+			return a ?? b;
+		}
 	}
 
 	private HashSet<uint> EffectiveBlacklist(PluginConfig cfg) {
@@ -1337,19 +1422,16 @@ internal sealed class BotRuntime : IAsyncDisposable {
 						}
 					}
 				}
-				if (TryGetProp(state, "scanIntervalHoursOverride", out JsonElement intvl)
+				if (TryGetProp(state, "scanIntervalDaysOverride", out JsonElement intvl)
 					&& intvl.ValueKind == JsonValueKind.Number
-					&& intvl.TryGetUInt32(out uint h) && h > 0) {
-					_scanIntervalHoursOverride = h;
+					&& intvl.TryGetUInt32(out uint d) && d > 0) {
+					_scanIntervalDaysOverride = d;
 				}
 				if (TryGetProp(state, "enabledOverride", out JsonElement en)) {
 					if (en.ValueKind == JsonValueKind.True) { _enabledOverride = true; } else if (en.ValueKind == JsonValueKind.False) { _enabledOverride = false; }
 				}
 				if (TryGetProp(state, "attemptProtectedOverride", out JsonElement prot)) {
 					if (prot.ValueKind == JsonValueKind.True) { _attemptProtectedOverride = true; } else if (prot.ValueKind == JsonValueKind.False) { _attemptProtectedOverride = false; }
-				}
-				if (TryGetProp(state, "onlyProfileGamesOverride", out JsonElement opg)) {
-					if (opg.ValueKind == JsonValueKind.True) { _onlyProfileGamesOverride = true; } else if (opg.ValueKind == JsonValueKind.False) { _onlyProfileGamesOverride = false; }
 				}
 				if (TryGetProp(state, "resumeFromAppID", out JsonElement resEl)
 					&& resEl.ValueKind == JsonValueKind.Number
@@ -1367,6 +1449,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					if (!string.IsNullOrEmpty(raw)
 						&& DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTime parsed)) {
 						_lastScanCompletedAt = parsed;
+					}
+				}
+				if (TryGetProp(state, "lastScanCancelledAt", out JsonElement lastCanc) && lastCanc.ValueKind == JsonValueKind.String) {
+					string? raw = lastCanc.GetString();
+					if (!string.IsNullOrEmpty(raw)
+						&& DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTime parsed)) {
+						_lastScanCancelledAt = parsed;
 					}
 				}
 				if (TryGetProp(state, "scansCompletedAllTime", out JsonElement scAll)
@@ -1426,8 +1515,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private void SavePersistentState() {
 		// Caller holds _gate. Hand-rolled JSON to avoid trimmed reflection paths.
 		string blacklistCsv = string.Join(",", _persistentBlacklist.Select(static x => x.ToString(CultureInfo.InvariantCulture)));
-		string intervalPart = _scanIntervalHoursOverride.HasValue
-			? ",\"scanIntervalHoursOverride\":" + _scanIntervalHoursOverride.Value.ToString(CultureInfo.InvariantCulture)
+		string intervalPart = _scanIntervalDaysOverride.HasValue
+			? ",\"scanIntervalDaysOverride\":" + _scanIntervalDaysOverride.Value.ToString(CultureInfo.InvariantCulture)
 			: "";
 		string enabledPart = _enabledOverride.HasValue
 			? ",\"enabledOverride\":" + (_enabledOverride.Value ? "true" : "false")
@@ -1435,15 +1524,15 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string protectedPart = _attemptProtectedOverride.HasValue
 			? ",\"attemptProtectedOverride\":" + (_attemptProtectedOverride.Value ? "true" : "false")
 			: "";
-		string profilePart = _onlyProfileGamesOverride.HasValue
-			? ",\"onlyProfileGamesOverride\":" + (_onlyProfileGamesOverride.Value ? "true" : "false")
-			: "";
 		string resumePart = _resumeFromAppID.HasValue
 			? ",\"resumeFromAppID\":" + _resumeFromAppID.Value.ToString(CultureInfo.InvariantCulture)
 			: "";
 		string totalPart = ",\"totalAchievementsUnlocked\":" + _totalAchievementsUnlocked.ToString(CultureInfo.InvariantCulture);
 		string lastPart = _lastScanCompletedAt.HasValue
 			? ",\"lastScanCompletedAt\":\"" + _lastScanCompletedAt.Value.ToString("o", CultureInfo.InvariantCulture) + "\""
+			: "";
+		string lastCancelPart = _lastScanCancelledAt.HasValue
+			? ",\"lastScanCancelledAt\":\"" + _lastScanCancelledAt.Value.ToString("o", CultureInfo.InvariantCulture) + "\""
 			: "";
 
 		string scansAllPart = ",\"scansCompletedAllTime\":" + _scansCompletedAllTime.ToString(CultureInfo.InvariantCulture);
@@ -1458,7 +1547,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		string lastScannedMap = SerializeUintDateMap(_lastScannedAt);
 
 		string json = "{\"blacklist\":[" + blacklistCsv + "]"
-			+ intervalPart + enabledPart + protectedPart + profilePart + resumePart + totalPart + lastPart
+			+ intervalPart + enabledPart + protectedPart + resumePart + totalPart + lastPart + lastCancelPart
 			+ scansAllPart + scanSecsPart + uptimePart
 			+ ",\"allTimeUnlocked\":" + allTimeMap
 			+ ",\"schemaTotal\":" + schemaTotalMap
@@ -1556,11 +1645,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 	private static bool ConfigEquivalent(PluginConfig a, PluginConfig b) =>
 		a.Enabled == b.Enabled
-		&& a.ScanIntervalHours == b.ScanIntervalHours
+		&& a.ScanIntervalDays == b.ScanIntervalDays
 		&& a.InitialDelaySeconds == b.InitialDelaySeconds
 		&& a.PerGameDelayMilliseconds == b.PerGameDelayMilliseconds
 		&& a.AttemptProtectedAchievements == b.AttemptProtectedAchievements
-		&& a.OnlyProfileGames == b.OnlyProfileGames
 		&& a.Blacklist.SetEquals(b.Blacklist);
 
 	private sealed class ScanResult {
