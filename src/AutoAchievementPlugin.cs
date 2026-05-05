@@ -392,12 +392,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							_scansCompletedSession++;
 						} else if (userCancelled) {
 							_lastScanCancelledAt = DateTime.UtcNow;
+							// User cancel = "give up on this run, start fresh next time".
+							// Wipe the resume point so the next scan (timer-triggered or
+							// !aanow) walks the library from index 0 instead of picking
+							// up at the AppID we'd just been processing.
+							_resumeFromAppID = null;
 						}
 						SavePersistentState();
 					}
 					if (userCancelled) {
 						_bot.ArchiLogger.LogGenericInfo(
-							$"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming, next scan in {FormatCountdown(TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)))}."
+							$"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming, next scan in {FormatCountdown(TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)))}. Resume point cleared; next scan starts from index 0."
 						);
 					} else {
 						LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
@@ -409,9 +414,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					userCancelled = true;
 					lock (_gate) {
 						_lastScanCancelledAt = DateTime.UtcNow;
+						_resumeFromAppID = null;
 						SavePersistentState();
 					}
-					_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan cancelled by user — AutoIdle resuming.");
+					_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan cancelled by user — AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
 				} catch (Exception ex) {
 					_bot.ArchiLogger.LogGenericException(ex);
 				} finally {
@@ -1136,11 +1142,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					_scansCompletedSession++;
 				} else if (userCancelled) {
 					_lastScanCancelledAt = DateTime.UtcNow;
+					_resumeFromAppID = null;
 				}
 				SavePersistentState();
 			}
 			if (userCancelled) {
-				_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming.");
+				_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
 				return $"Scan cancelled in {FormatDuration(elapsed)}.";
 			}
 			LogScanSummary(result, elapsed);
@@ -1150,6 +1157,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			TimeSpan elapsed = DateTime.UtcNow - startedAt;
 			lock (_gate) {
 				_lastScanCancelledAt = DateTime.UtcNow;
+				_resumeFromAppID = null;
 				SavePersistentState();
 			}
 			_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming.");
