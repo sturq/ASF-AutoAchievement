@@ -180,6 +180,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private bool? _attemptProtectedOverride;
 	private bool? _allowCardFarmingOverride;
 	private DateTime? _lastScanCancelledAt;
+	// Duration of the most recent scan, in seconds. Used by aashow to
+	// report "last scan took Xh Ym" alongside "Xd ago".
+	private long _lastScanDurationSeconds;
+	// Number of AppIDs targeted by the most recent scan. Used to estimate
+	// "next scan will take ~Yh Zm" from per-game delay × count without
+	// having to do a fresh discovery on aashow.
+	private int _lastScanTargetCount;
 	private CancellationTokenSource? _scanCancelCts;
 	private long _totalAchievementsUnlocked;
 	private bool _persistentLoaded;
@@ -386,6 +393,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					lock (_gate) {
 						_totalAchievementsUnlocked += result.AchievementsUnlocked;
 						_scanSecondsAllTime += elapsedSecs;
+						_lastScanDurationSeconds = elapsedSecs;
 						if (fullPass) {
 							_lastScanCompletedAt = DateTime.UtcNow;
 							_scansCompletedAllTime++;
@@ -526,6 +534,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			_currentScanTotal = targets.Count;
 			_currentScanStartedAt = DateTime.UtcNow;
 			_currentScanGameID = null;
+			_lastScanTargetCount = targets.Count;
 		}
 
 		// Signal sibling plugins (currently: ASF-AutoIdle) to release the
@@ -938,6 +947,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		long scanSecsAll;
 		int sessionUnlocked;
 		DateTime? lastCancelled;
+		long lastDurSecs;
+		int lastTargetCount;
 		lock (_gate) {
 			cfg = _config;
 			last = _lastScanCompletedAt;
@@ -953,6 +964,8 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			scansAll = _scansCompletedAllTime;
 			scansSession = _scansCompletedSession;
 			scanSecsAll = _scanSecondsAllTime;
+			lastDurSecs = _lastScanDurationSeconds;
+			lastTargetCount = _lastScanTargetCount;
 			sessionUnlocked = 0;
 			foreach (long v in _sessionUnlocked.Values) { sessionUnlocked += (int) v; }
 		}
@@ -995,9 +1008,20 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			TimeSpan ago = DateTime.UtcNow - lastEnded.Value;
 			TimeSpan nextIn = TimeSpan.FromDays(EffectiveScanIntervalDays(cfg)) - ago;
 			if (nextIn < TimeSpan.Zero) { nextIn = TimeSpan.Zero; }
-			lines.Add($"  Last scan: {FormatDuration(ago)} ago ({lastLabel}), next in: {FormatCountdown(nextIn)}");
+			string durSuffix = lastDurSecs > 0
+				? $", took {FormatDuration(TimeSpan.FromSeconds(lastDurSecs))}"
+				: "";
+			lines.Add($"  Last scan: {FormatDuration(ago)} ago ({lastLabel}{durSuffix}), next in: {FormatCountdown(nextIn)}");
 		} else {
 			lines.Add("  Last scan: never (waiting for first run)");
+		}
+
+		// Next-scan duration estimate. Uses the most recent target count
+		// (persisted) × per-game delay + ~1.5s Steam roundtrip per game.
+		// Falls back gracefully if we haven't run a scan yet.
+		if (lastTargetCount > 0) {
+			long estimatedMs = (long) lastTargetCount * (cfg.PerGameDelayMilliseconds + 1500L);
+			lines.Add($"  Next scan estimated duration: ~{FormatDuration(TimeSpan.FromMilliseconds(estimatedMs))} ({lastTargetCount} games × {cfg.PerGameDelayMilliseconds + 1500L}ms each — actual time depends on Steam response speed and per-game pauses)");
 		}
 
 		// Plugin uptime.
@@ -1136,6 +1160,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lock (_gate) {
 				_totalAchievementsUnlocked += result.AchievementsUnlocked;
 				_scanSecondsAllTime += (long) elapsed.TotalSeconds;
+				_lastScanDurationSeconds = (long) elapsed.TotalSeconds;
 				if (result.FullLibraryPass) {
 					_lastScanCompletedAt = DateTime.UtcNow;
 					_scansCompletedAllTime++;
@@ -1577,6 +1602,14 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					&& scSec.ValueKind == JsonValueKind.Number && scSec.TryGetInt64(out long ss) && ss >= 0) {
 					_scanSecondsAllTime = ss;
 				}
+				if (TryGetProp(state, "lastScanDurationSeconds", out JsonElement lds)
+					&& lds.ValueKind == JsonValueKind.Number && lds.TryGetInt64(out long ld) && ld >= 0) {
+					_lastScanDurationSeconds = ld;
+				}
+				if (TryGetProp(state, "lastScanTargetCount", out JsonElement ltc)
+					&& ltc.ValueKind == JsonValueKind.Number && ltc.TryGetInt32(out int lt) && lt >= 0) {
+					_lastScanTargetCount = lt;
+				}
 				if (TryGetProp(state, "totalUptimeSeconds", out JsonElement upt)
 					&& upt.ValueKind == JsonValueKind.Number && upt.TryGetInt64(out long uptSecs) && uptSecs >= 0) {
 					_totalUptimeBaselineSeconds = uptSecs;
@@ -1650,7 +1683,9 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			: "";
 
 		string scansAllPart = ",\"scansCompletedAllTime\":" + _scansCompletedAllTime.ToString(CultureInfo.InvariantCulture);
-		string scanSecsPart = ",\"scanSecondsAllTime\":" + _scanSecondsAllTime.ToString(CultureInfo.InvariantCulture);
+		string scanSecsPart = ",\"scanSecondsAllTime\":" + _scanSecondsAllTime.ToString(CultureInfo.InvariantCulture)
+			+ ",\"lastScanDurationSeconds\":" + _lastScanDurationSeconds.ToString(CultureInfo.InvariantCulture)
+			+ ",\"lastScanTargetCount\":" + _lastScanTargetCount.ToString(CultureInfo.InvariantCulture);
 
 		long totalUptime = _totalUptimeBaselineSeconds + (long) (DateTime.UtcNow - _sessionStartedAt).TotalSeconds;
 		string uptimePart = ",\"totalUptimeSeconds\":" + totalUptime.ToString(CultureInfo.InvariantCulture);
