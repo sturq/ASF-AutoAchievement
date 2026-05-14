@@ -752,6 +752,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		if (get.Result != EResult.OK) {
 			// Steam returns Fail / Invalid for apps that don't have a user-stats
 			// schema configured (i.e. no Steam achievements). Treat as "no achievements".
+			// Record the snapshot anyway so dynamic checks know we've seen this
+			// AppID — otherwise every dynamic check re-scans the same ~thousands
+			// of DLC / soundtrack / demo / Steamworks-Redistributable entries
+			// from dynamicstore, because they never make it into _lastScannedAt
+			// and the filter (ExceptWith _lastScannedAt.Keys) sees them as new
+			// games forever.
+			RecordSchemaSnapshot(appID, total: 0, alreadyUnlocked: 0);
 			return new GameScanOutcome(0, false, NoAchievements: true, AlreadyComplete: false, Rejected: false, TotalInSchema: 0, Detail: "this game has no Steam achievements");
 		}
 
