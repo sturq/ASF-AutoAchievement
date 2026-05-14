@@ -17,7 +17,7 @@ Two scan modes work together:
 3. Record each AppID in the per-bot scan database (`_lastScannedAt`).
 4. Sleep until next full-scan due.
 
-**Dynamic check** (every `DynamicCheckIntervalHours`, default 6 hours, between full scans):
+**Dynamic check** (every `DynamicCheckIntervalHours`, default 24 hours, between full scans — set to `0` or use `aadint off` to disable):
 1. Same library enumeration as above.
 2. Filter to AppIDs **not** in the scan database — i.e. never seen before.
 3. **If filtered set is empty: return immediately without signalling AutoIdle.** Zero downtime for sibling plugins.
@@ -28,7 +28,7 @@ Achievements with a non-zero `permission` flag in the schema are server-protecte
 ## Features
 
 - **Plug-and-play discovery** — uses ASF's authenticated session; rides on the bot's already-authenticated protocol connection. No Web API key needed.
-- **Two scan modes** — full library scan on a configurable day interval + frequent dynamic checks that catch newly-acquired games (free claims, gifts, etc.) within hours.
+- **Two scan modes** — full library scan on a configurable day interval + dynamic checks (every N hours, default 24, can be disabled) that catch newly-acquired games (free claims, gifts, etc.) without waiting for the next full scan.
 - **Persistent scan database** — every AppID that's been scanned is recorded in `BotDatabase` (`_lastScannedAt`). Dynamic checks use this to filter to genuinely-new AppIDs.
 - **Coexist with ASF's card farmer** — `AllowCardFarming: true` (default). When ASF is actively farming a card during a scan, AA waits at the current game until farming completes, then resumes scan from the same AppID — no progress lost.
 - **Coexist with ASF-AutoIdle** — AA sends `idlepause` / `idleresume` signals via ASF's command bus before/after each scan. If AutoIdle isn't installed, AA falls back to `Bot.Actions.Resume()` directly.
@@ -75,7 +75,7 @@ Every key is optional. Defaults shown.
 "AutoAchievement": {
     "Enabled": true,
     "ScanIntervalDays": 7,
-    "DynamicCheckIntervalHours": 6,
+    "DynamicCheckIntervalHours": 24,
     "InitialDelaySeconds": 60,
     "PerGameDelayMilliseconds": 750,
     "AttemptProtectedAchievements": false,
@@ -88,7 +88,7 @@ Every key is optional. Defaults shown.
 |---|---|---|---|
 | `Enabled` | bool | `true` if block exists | Master switch for that bot. |
 | `ScanIntervalDays` | uint | `7` | Full library scan cadence. Min enforced: 1. |
-| `DynamicCheckIntervalHours` | uint | `6` | Between full scans, how often to check for newly-acquired games. Min enforced: 1. Set high (e.g. 168 = once per week) to effectively disable dynamic checks. |
+| `DynamicCheckIntervalHours` | uint | `24` | Between full scans, how often to check for newly-acquired games. Set to `0` to disable dynamic checks entirely (full scan only). Otherwise any positive integer of hours. |
 | `InitialDelaySeconds` | uint | `60` | Wait after login before first scan attempt. |
 | `PerGameDelayMilliseconds` | uint | `750` | Delay between games inside one scan. Reduces Steam rate-limit risk. |
 | `AttemptProtectedAchievements` | bool | `false` | Try to unlock achievements whose schema lists `permission > 0`. Steam usually rejects these. Off by default to keep logs quiet. Toggle at runtime with `aaprotected`. |
@@ -114,6 +114,7 @@ Send these to a bot via ASF's command interface (web UI Commands tab, IPC, or a 
 | `aablacklist [bot] <appid\|name>` | `aabl`, `aablock` | Add a game to the never-scan blacklist. |
 | `aablacklistremove [bot] <appid\|name>` | `aablrm`, `aaunblock` | Remove from blacklist. |
 | `aainterval [bot] <days>` | `aaint` | Change full-scan interval (0 to clear override; min 1). |
+| `aadynamicinterval [bot] <hours\|off\|reset>` | `aadint`, `aadinterval` | Change dynamic-check interval (positive integer of hours), `off` to disable dynamic checks entirely, `reset` to clear the runtime override and fall back to JSON config. No arg = show current value. |
 | `aaprotected [bot] [on\|off\|reset]` | `aaprot` | Runtime override for `AttemptProtectedAchievements` (no arg = show). |
 | `aacards [bot]` | — | Toggle `AllowCardFarming` (yield play slot to ASF card farmer vs scan unconditionally). |
 | `aatoggle [bot]` | — | Toggle the plugin on/off at runtime. |
