@@ -1,24 +1,51 @@
 # ASF-AutoAchievement
 
-An [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamFarm) plugin that **auto-detects every game on your account and unlocks all available achievements** — like [Steam Achievement Manager](https://github.com/gibbed/SteamAchievementManager) (SAM) Picker, but fully automated, recurring, and remote (no Steam client running). Re-scans your library on an interval to catch new achievements added in game updates.
+An [ArchiSteamFarm](https://github.com/JustArchiNET/ArchiSteamFarm) plugin that **auto-detects every game your account has access to and unlocks all available achievements** — like [Steam Achievement Manager](https://github.com/gibbed/SteamAchievementManager) (SAM) Picker, but fully automated, recurring, and remote (no Steam client running).
 
 No Steam Web API key. No game IDs to enter. Drop the DLL in `plugins/`, set `"AutoAchievement": { "Enabled": true }` in your bot config, restart ASF.
 
 ## How it works
 
-1. Discover the bot's library via `IPlayerService.GetOwnedGames` (rides on the bot's already-authenticated SteamKit2 session).
-2. For each owned game (skipping the blacklist):
+Two scan modes work together:
+
+**Full library scan** (every `ScanIntervalDays`, default 7 days):
+1. Enumerate every AppID the account has access to via the store `dynamicstore/userdata` endpoint. This includes paid games, played free-to-play, **unplayed F2P claims**, demos with stat schemas — basically every AppID that could possibly have achievements.
+2. For each AppID (skipping the blacklist):
    - Briefly enter `Playing(appID)` so Steam will accept stat writes.
    - Send a `ClientGetUserStats` message and parse the binary KeyValue schema in the response — this lists every achievement bit and its `permission` flag.
    - OR new bits into the existing stat values and push back via `ClientStoreUserStats2`.
-3. Sleep `ScanIntervalHours`, repeat.
+3. Record each AppID in the per-bot scan database (`_lastScannedAt`).
+4. Sleep until next full-scan due.
+
+**Dynamic check** (every `DynamicCheckIntervalHours`, default 6 hours, between full scans):
+1. Same library enumeration as above.
+2. Filter to AppIDs **not** in the scan database — i.e. never seen before.
+3. **If filtered set is empty: return immediately without signalling AutoIdle.** Zero downtime for sibling plugins.
+4. If new games exist: signal sibling pause, scan only those AppIDs, signal resume.
 
 Achievements with a non-zero `permission` flag in the schema are server-protected — Steam normally rejects client-side writes for those. Off by default; flip `AttemptProtectedAchievements: true` (or use `aaprotected on` at runtime) if you want to try them anyway.
 
+## Features
+
+- **Plug-and-play discovery** — uses ASF's authenticated session; rides on the bot's already-authenticated protocol connection. No Web API key needed.
+- **Two scan modes** — full library scan on a configurable day interval + frequent dynamic checks that catch newly-acquired games (free claims, gifts, etc.) within hours.
+- **Persistent scan database** — every AppID that's been scanned is recorded in `BotDatabase` (`_lastScannedAt`). Dynamic checks use this to filter to genuinely-new AppIDs.
+- **Coexist with ASF's card farmer** — `AllowCardFarming: true` (default). When ASF is actively farming a card during a scan, AA waits at the current game until farming completes, then resumes scan from the same AppID — no progress lost.
+- **Coexist with ASF-AutoIdle** — AA sends `idlepause` / `idleresume` signals via ASF's command bus before/after each scan. If AutoIdle isn't installed, AA falls back to `Bot.Actions.Resume()` directly.
+- **Resume from interruption** — if ASF disconnects mid-scan (e.g. `LoggedInElsewhere` when you open Steam on your PC), the AppID being scanned is persisted. Next session picks up at the exact same game.
+- **Honour the cooldown across reconnects** — disconnect/reconnect doesn't trigger a fresh scan if one already completed within the configured interval.
+- **User cancel via `!aacancel`** — interrupts the in-flight scan, wipes the resume point (so next scan starts from index 0), AutoIdle resumes within seconds. The configured cooldown is honoured — the next scan won't fire until the interval elapses, even if the cancel happened mid-cycle.
+- **Per-mode metrics** — game count scanned in full scans vs dynamic checks, session + all-time, persisted.
+- **Per-game stats** — total achievements unlocked per game, last-scanned timestamp, schema completion ratio (X/Y unlocked), persisted.
+- **Plugin uptime tracking** — per-session and total across all sessions.
+- **Per-game blacklist** — both via JSON config and via runtime commands; merged.
+- **Live config reload** — edit a bot's JSON config and ASF re-runs `OnBotInitModules`; the plugin restarts that bot's loop transparently when relevant fields change.
+- **Independence** — works with or without ASF-AutoIdle installed; AutoIdle isn't a hard dependency. Card farming coexistence works either way.
+
 ## Install
 
-1. Build the DLL (see below) or grab a release.
-2. Drop `ASF-AutoAchievement.dll` into `<your ASF folder>/plugins/ASF-AutoAchievement/`.
+1. Download `ASF-AutoAchievement.dll` from the [latest release](../../releases) (or build from source).
+2. Drop it into `<your ASF folder>/plugins/ASF-AutoAchievement/`.
 3. Add to any bot config under `<ASF>/config/<BotName>.json`, anywhere inside the outer `{ ... }`:
    ```json
    "AutoAchievement": { "Enabled": true }
@@ -29,17 +56,15 @@ You should see in the log:
 ```
 ASF-AutoAchievement vX.Y.Z.0 loaded — every bot's library will be scanned for new achievements.
 <Bot> > AutoAchievement: scan loop started.
-<Bot> > AutoAchievement: profile owned-games returned N entries.
-<Bot> > AutoAchievement: scanning N game(s) (skipping K blacklisted). Estimated time: ...
-<Bot> > AutoAchievement: scan complete in 14m 32s.
-  Games scanned: 570
-    - With new achievements unlocked: 12
+<Bot> > AutoAchievement: starting full library scan.
+<Bot> > AutoAchievement: dynamicstore returned 2480 entries (including DLC / demos / unplayed free games).
+<Bot> > AutoAchievement: full library scan — scanning 2480 game(s). Estimated time: 1h 33m.
+<Bot> > AutoAchievement: full library scan complete in 1h 33m.
+  Games scanned: 2480
+    - With new achievements unlocked: 24
     - Already 100% complete: 8
-    - No Steam achievements: 540
-  Achievements unlocked this scan: 198
-  Per-game unlocks:
-    Rust (252490): 53 → 86/102
-    ...
+    - No Steam achievements: 2440
+  Achievements unlocked this scan: 412
 ```
 
 ## Configuration
@@ -49,10 +74,12 @@ Every key is optional. Defaults shown.
 ```json
 "AutoAchievement": {
     "Enabled": true,
-    "ScanIntervalHours": 12,
+    "ScanIntervalDays": 7,
+    "DynamicCheckIntervalHours": 6,
     "InitialDelaySeconds": 60,
     "PerGameDelayMilliseconds": 750,
     "AttemptProtectedAchievements": false,
+    "AllowCardFarming": true,
     "Blacklist": []
 }
 ```
@@ -60,10 +87,12 @@ Every key is optional. Defaults shown.
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `Enabled` | bool | `true` if block exists | Master switch for that bot. |
-| `ScanIntervalHours` | uint | `12` | How often to re-scan the whole library. Min enforced: 1. |
-| `InitialDelaySeconds` | uint | `60` | Wait after login before the first scan. |
+| `ScanIntervalDays` | uint | `7` | Full library scan cadence. Min enforced: 1. |
+| `DynamicCheckIntervalHours` | uint | `6` | Between full scans, how often to check for newly-acquired games. Min enforced: 1. Set high (e.g. 168 = once per week) to effectively disable dynamic checks. |
+| `InitialDelaySeconds` | uint | `60` | Wait after login before first scan attempt. |
 | `PerGameDelayMilliseconds` | uint | `750` | Delay between games inside one scan. Reduces Steam rate-limit risk. |
 | `AttemptProtectedAchievements` | bool | `false` | Try to unlock achievements whose schema lists `permission > 0`. Steam usually rejects these. Off by default to keep logs quiet. Toggle at runtime with `aaprotected`. |
+| `AllowCardFarming` | bool | `true` | When `true`, scans pause at the current game while ASF's card farmer is active; resume at that same AppID when farming finishes. When `false`, scans run unconditionally and may preempt card farming. |
 | `Blacklist` | uint[] | `[]` | AppIDs the plugin will never touch. Merged with the runtime blacklist. |
 
 ### Opt-out
@@ -72,18 +101,21 @@ A bot config without an `AutoAchievement` block is ignored entirely. Or set `"Au
 
 ## Runtime commands
 
-Send these to a bot via ASF's command interface (web UI Commands tab, IPC, or a chat DM to the bot). Operator-level access is required. Pass the bot name as the first argument, or omit it to default to ASF's chosen bot.
+Send these to a bot via ASF's command interface (web UI Commands tab, IPC, or a chat DM). Operator-level access is required. Pass the bot name as the first argument, or omit it to default to ASF's chosen bot.
 
 | Command | Aliases | What it does |
 |---|---|---|
-| `aashow [bot]` | `aastatus` | Status: enabled, current scan progress, last scan, blacklist, totals. |
+| `aashow [bot]` | `aastatus` | Status: scan intervals, last scan type (full / dynamic) + duration, next due times, per-mode game-scan metrics, next-scan duration estimate. |
 | `aanow [bot]` | `aascan` | Run a full library scan immediately. |
+| `aacheck [bot]` | `aadynamic` | Run a dynamic check immediately — scans only games never seen before. Useful right after claiming a free game. |
+| `aacancel [bot]` | `aastop` | Cancel the in-flight scan. Wipes the resume point so the next scan starts from index 0. AutoIdle resumes within seconds. |
 | `aagame [bot] <appid\|name>` | `aaone` | Unlock achievements for a single game (interactive use). |
 | `aastats [bot] [N\|all]` | `aastat` | Per-game stats (default: all, sorted by all-time desc). Shows X/Y completion ratios. |
 | `aablacklist [bot] <appid\|name>` | `aabl`, `aablock` | Add a game to the never-scan blacklist. |
 | `aablacklistremove [bot] <appid\|name>` | `aablrm`, `aaunblock` | Remove from blacklist. |
-| `aainterval [bot] <hours>` | `aaint` | Change scan interval (0 to clear override; min 1). |
+| `aainterval [bot] <days>` | `aaint` | Change full-scan interval (0 to clear override; min 1). |
 | `aaprotected [bot] [on\|off\|reset]` | `aaprot` | Runtime override for `AttemptProtectedAchievements` (no arg = show). |
+| `aacards [bot]` | — | Toggle `AllowCardFarming` (yield play slot to ASF card farmer vs scan unconditionally). |
 | `aatoggle [bot]` | — | Toggle the plugin on/off at runtime. |
 | `aahelp` | — | Print the command list. |
 
@@ -91,9 +123,36 @@ The blacklist accepts either an AppID (e.g. `730`) or a substring of the game's 
 
 ### Persistence
 
-Runtime state — blacklist additions, `ScanIntervalHours` override, enabled override, `AttemptProtectedAchievements` override, total achievements unlocked counter, per-game unlock counts, schema completion snapshots, last scan timestamp, scan totals, and total uptime — is saved per-bot in ASF's `BotDatabase` under the key `ASF.AutoAchievement.State`. Survives ASF restarts.
+Runtime state is saved per-bot in ASF's `BotDatabase` under the key `ASF.AutoAchievement.State`. Survives ASF restarts. Includes:
+- Persistent blacklist additions
+- `ScanIntervalDays`, `DynamicCheckIntervalHours`, enabled, `AttemptProtectedAchievements`, `AllowCardFarming` runtime overrides
+- Total achievements unlocked counter
+- Per-game unlock counts + schema snapshots (completion ratios)
+- Per-AppID `_lastScannedAt` (the database used to filter dynamic-check targets)
+- Last full-scan completion timestamp + last-scan-cancelled timestamp + last dynamic check timestamp
+- Last scan duration + target count (for "Next scan estimated duration")
+- Last scan type (full vs dynamic) + resume scan type
+- Scans-completed counters (session + all-time)
+- Per-mode game-scan counters (full + dynamic, session + all-time)
+- Resume-from-AppID for interrupted scans
+- Plugin uptime baseline
 
 JSON-config `Blacklist` is read on every `OnBotInitModules` and **merged** with the runtime persistent set.
+
+## Sibling-plugin coordination
+
+When [ASF-AutoIdle](https://github.com/sturq/ASF-AutoIdle) is installed and idling games, AutoAchievement signals it to pause before each scan:
+
+1. **Before scan starts**: AA sends `idlepause ASF-AutoAchievement` via ASF's command bus.
+2. **During scan**: each per-game scan briefly enters `Playing(appID)` for stat writes.
+3. **Game-by-game pauses**: if the user opens a Steam game on their PC (`IsPlayingPossible=false`) or ASF's card farmer becomes active, AA waits at the current game until the slot frees up. Resumes the scan at the same AppID.
+4. **After scan ends** (complete, cancelled, or errored): AA sends `idleresume` so AutoIdle picks back up.
+
+If AutoIdle isn't installed, the `idlepause`/`idleresume` commands return no response (ASF returns nothing for unrecognised commands), and AA falls back to `Bot.Actions.Resume()` directly. Independence is preserved.
+
+The **least-downtime path** for AutoIdle:
+- Full scans always pause AutoIdle for the scan duration (necessary — every game in the library is scanned).
+- Dynamic checks pause AutoIdle **only if there are new games to scan**. If the filtered target set is empty after applying the `_lastScannedAt` filter, AA returns immediately without sending `idlepause`. AutoIdle keeps idling uninterrupted.
 
 ## Build from source
 
@@ -116,11 +175,13 @@ The compiled `ASF-AutoAchievement.dll` ends up in `./publish`. Copy it into `<AS
 
 ## Notes / gotchas
 
-- **VAC / anti-cheat games** — unlocking achievements via direct stat writes is purely cosmetic / not detected by VAC, but **competitive games' leaderboards may flag accounts** (e.g. CS, Dota). Add those to the blacklist (the example config blacklists `730` CS and `570` Dota by default).
+- **VAC / anti-cheat games** — unlocking achievements via direct stat writes is purely cosmetic / not detected by VAC, but **competitive games' leaderboards may flag accounts** (e.g. CS, Dota). Add those to the blacklist if you care.
 - **Server-protected achievements** — most modern multiplayer titles validate achievements server-side. The schema marks these with `permission > 0`. Steam responds `EResult.AccessDenied` to client-side writes; the plugin logs and moves on. There is no way to unlock these from outside the game's own backend.
-- **Conflict with AutoIdle** — if you also run `ASF-AutoIdle`, the achievement scan briefly takes over the playing slot for one game at a time. AutoIdle's normal rotation resumes after the scan finishes (the plugin calls `Bot.Actions.Resume()` on completion).
-- **Free-to-play games** — `IPlayerService.GetOwnedGames` only returns F2P titles you've actually launched. Those can be unlocked the same way. Untouched F2P titles won't show up.
+- **Conflict with AutoIdle** — handled via the `idlepause`/`idleresume` signals described above. No manual setup required.
+- **Unplayed free-to-play games** — covered by the dynamicstore enumeration. F2P claims, demos with achievements, etc. are all picked up.
 - **Limited accounts** — bots that haven't spent money can still receive achievements; this is independent of the limited-account restriction (which mainly affects trading).
+- **Disconnect/reconnect during scan** — `_resumeFromAppID` is set before each game is scanned. Next session resumes at the same AppID. `_lastScanCancelledAt` is set on user cancel (`!aacancel`) and the resume point is wiped so the next scan starts fresh from index 0.
+- **Estimated next-scan duration** — surfaced in `aashow` as `~Xh Ym (N games × 2250ms each)`. Real time depends on Steam response speed and per-game pauses.
 
 ## License
 
