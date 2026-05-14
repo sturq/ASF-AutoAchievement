@@ -126,6 +126,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 			"AABLACKLIST" or "AABL" or "AABLOCK" => await runtime.HandleAddBlacklist(tail).ConfigureAwait(false),
 			"AABLACKLISTREMOVE" or "AABLRM" or "AAUNBLOCK" => runtime.HandleRemoveBlacklist(tail),
 			"AAINTERVAL" or "AAINT" => runtime.HandleInterval(tail),
+			"AADYNAMICINTERVAL" or "AADINT" or "AADINTERVAL" => runtime.HandleDynamicInterval(tail),
 			"AAPROTECTED" or "AAPROT" => runtime.HandleProtected(tail),
 			"AACARDS" => runtime.HandleAllowCardFarmingToggle(),
 			"AACANCEL" or "AASTOP" => runtime.HandleCancel(),
@@ -156,7 +157,8 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 		"  aastats [bot] [N|all]                     — per-game stats (default: all, sorted by all-time desc)",
 		"  aablacklist [bot] <appid|name>            — never touch this game",
 		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
-		"  aainterval [bot] <days>                   — change scan interval in days (0 to reset to default)",
+		"  aainterval [bot] <days>                   — change full-scan interval in days (0 to reset to default)",
+		"  aadynamicinterval [bot] <hours|off|reset> — change dynamic-check interval in hours, 'off' to disable, 'reset' to clear override (alias: aadint)",
 		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
 		"  aacards [bot]                             — toggle AllowCardFarming (yield play slot to ASF card farmer)",
 		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
@@ -362,11 +364,16 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				}
 
 				TimeSpan fullInterval = TimeSpan.FromDays(EffectiveScanIntervalDays(cfg));
-				TimeSpan dynamicInterval = TimeSpan.FromHours(EffectiveDynamicCheckIntervalHours(cfg));
+				uint dynamicHours = EffectiveDynamicCheckIntervalHours(cfg);
+				bool dynamicEnabled = dynamicHours > 0;
+				TimeSpan dynamicInterval = dynamicEnabled
+					? TimeSpan.FromHours(dynamicHours)
+					: TimeSpan.MaxValue;
 
 				DateTime now = DateTime.UtcNow;
 				bool fullDue = !lastFullEnd.HasValue || (now - lastFullEnd.Value) >= fullInterval;
-				bool dynamicDue = !lastDynamic.HasValue || (now - lastDynamic.Value) >= dynamicInterval;
+				bool dynamicDue = dynamicEnabled
+					&& (!lastDynamic.HasValue || (now - lastDynamic.Value) >= dynamicInterval);
 
 				bool runScan = false;
 				bool fullScan = true;
@@ -474,8 +481,11 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				DateTime? recheckDynamic;
 				lock (_gate) { recheckDynamic = _lastDynamicCheckAt; }
 				DateTime nextFullDue = (recheckFullEnd ?? DateTime.UtcNow).Add(fullInterval);
-				DateTime nextDynamicDue = (recheckDynamic ?? DateTime.UtcNow).Add(dynamicInterval);
-				DateTime soonestDue = nextDynamicDue < nextFullDue ? nextDynamicDue : nextFullDue;
+				DateTime soonestDue = nextFullDue;
+				if (dynamicEnabled) {
+					DateTime nextDynamicDue = (recheckDynamic ?? DateTime.UtcNow).Add(dynamicInterval);
+					if (nextDynamicDue < soonestDue) { soonestDue = nextDynamicDue; }
+				}
 				TimeSpan untilNext = soonestDue - DateTime.UtcNow;
 				if (untilNext < TimeSpan.FromSeconds(30)) { untilNext = TimeSpan.FromSeconds(30); }
 
@@ -1060,7 +1070,12 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		lines.Add($"AutoAchievement status for {_bot.BotName}:");
 		lines.Add($"  Enabled: {IsEnabled(cfg)}{(enabledOverride.HasValue ? " (runtime override)" : "")}");
 		lines.Add($"  Full-scan interval: every {EffectiveScanIntervalDays(cfg)} day(s){(intervalOverride.HasValue ? " (runtime override)" : "")}");
-		lines.Add($"  Dynamic-check interval: every {EffectiveDynamicCheckIntervalHours(cfg)} hour(s){(dynIntervalOverride.HasValue ? " (runtime override)" : "")} — scans games never seen before, no pause on AutoIdle when nothing new");
+		uint effDynHours = EffectiveDynamicCheckIntervalHours(cfg);
+		string dynIntervalLine = effDynHours == 0
+			? "  Dynamic-check interval: disabled (full scan only)"
+			: $"  Dynamic-check interval: every {effDynHours} hour(s) — scans games never seen before, no pause on AutoIdle when nothing new";
+		if (dynIntervalOverride.HasValue) { dynIntervalLine += " (runtime override)"; }
+		lines.Add(dynIntervalLine);
 		lines.Add($"  Initial delay: {cfg.InitialDelaySeconds}s, per-game delay: {cfg.PerGameDelayMilliseconds}ms");
 		bool? protOverride;
 		bool? acfOverride;
@@ -1105,13 +1120,17 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		// Dynamic check timing — independent of the full-scan cooldown.
-		if (lastDynamic.HasValue) {
-			TimeSpan dyAgo = DateTime.UtcNow - lastDynamic.Value;
-			TimeSpan dyNext = TimeSpan.FromHours(EffectiveDynamicCheckIntervalHours(cfg)) - dyAgo;
-			if (dyNext < TimeSpan.Zero) { dyNext = TimeSpan.Zero; }
-			lines.Add($"  Last dynamic check: {FormatDuration(dyAgo)} ago, next dynamic check in: {FormatCountdown(dyNext)}");
-		} else {
-			lines.Add("  Last dynamic check: never (waiting for first run)");
+		// Suppress when disabled (interval = 0); the "interval: disabled"
+		// line above is enough info on its own.
+		if (effDynHours > 0) {
+			if (lastDynamic.HasValue) {
+				TimeSpan dyAgo = DateTime.UtcNow - lastDynamic.Value;
+				TimeSpan dyNext = TimeSpan.FromHours(effDynHours) - dyAgo;
+				if (dyNext < TimeSpan.Zero) { dyNext = TimeSpan.Zero; }
+				lines.Add($"  Last dynamic check: {FormatDuration(dyAgo)} ago, next dynamic check in: {FormatCountdown(dyNext)}");
+			} else {
+				lines.Add("  Last dynamic check: never (waiting for first run)");
+			}
 		}
 
 		// Next-scan duration estimate. Uses the most recent target count
@@ -1409,6 +1428,49 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return $"Scan interval is now {days} day(s). The change applies on the next sleep cycle.";
 	}
 
+	// Change the dynamic-check interval at runtime. Two special argument
+	// forms: no arg = show, "off"/"disable"/"0" = disable dynamic checks
+	// entirely (full scan only). Any positive integer = hours between
+	// dynamic checks.
+	internal string HandleDynamicInterval(string[] args) {
+		PluginConfig cfg;
+		lock (_gate) { cfg = _config; }
+
+		if (args.Length == 0) {
+			uint cur = EffectiveDynamicCheckIntervalHours(cfg);
+			string state = cur == 0 ? "disabled (full scan only)" : $"every {cur} hour(s)";
+			return $"Dynamic-check interval: {state}\nUsage: !aadynamicinterval <hours>   (0 or 'off' to disable, 'reset' to clear runtime override)";
+		}
+
+		string raw = args[0].Trim();
+
+		if (raw.Equals("RESET", StringComparison.OrdinalIgnoreCase)) {
+			lock (_gate) {
+				_dynamicCheckIntervalHoursOverride = null;
+				SavePersistentState();
+			}
+			uint deflt = cfg.DynamicCheckIntervalHours;
+			string state = deflt == 0 ? "disabled (full scan only)" : $"{deflt} hour(s)";
+			return $"Reset. Dynamic-check interval is now {state} (from JSON config).";
+		}
+
+		uint hours;
+		if (raw.Equals("OFF", StringComparison.OrdinalIgnoreCase) || raw.Equals("DISABLE", StringComparison.OrdinalIgnoreCase) || raw.Equals("DISABLED", StringComparison.OrdinalIgnoreCase)) {
+			hours = 0;
+		} else if (!uint.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out hours)) {
+			return $"'{raw}' is not a valid value. Pass a non-negative integer of hours, 'off' to disable, or 'reset' to clear the override.";
+		}
+
+		lock (_gate) {
+			_dynamicCheckIntervalHoursOverride = hours;
+			SavePersistentState();
+		}
+		if (hours == 0) {
+			return "Dynamic-check interval is now disabled (full scan only). The change applies on the next sleep cycle.";
+		}
+		return $"Dynamic-check interval is now every {hours} hour(s). The change applies on the next sleep cycle.";
+	}
+
 	// Cancel an in-flight scan and let AutoIdle take back the play slot. The
 	// loop's main token stays alive; only the per-scan CTS gets cancelled, so
 	// the loop keeps running and will respect the configured cooldown before
@@ -1547,8 +1609,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private uint EffectiveDynamicCheckIntervalHours(PluginConfig cfg) {
 		uint? overrideValue;
 		lock (_gate) { overrideValue = _dynamicCheckIntervalHoursOverride; }
-		uint chosen = overrideValue ?? cfg.DynamicCheckIntervalHours;
-		return Math.Max(1u, chosen);
+		// 0 is a valid value here — it disables dynamic checks entirely.
+		// We don't floor at 1 like full-scan-days because there's no
+		// reason to forbid "off".
+		return overrideValue ?? cfg.DynamicCheckIntervalHours;
 	}
 
 	// Last time a scan ended for any reason — completion or user-cancel.

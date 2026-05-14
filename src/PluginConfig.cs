@@ -25,8 +25,9 @@ public sealed class PluginConfig {
 	// Each dynamic check filters to AppIDs that have no _lastScannedAt
 	// entry — i.e. never scanned. New games are picked up within this
 	// interval; existing games still get rescanned by the full scan every
-	// ScanIntervalDays for any new achievements the dev added.
-	public uint DynamicCheckIntervalHours { get; set; } = 6;
+	// ScanIntervalDays for any new achievements the dev added. Set to 0
+	// to disable dynamic checks entirely (full scan only).
+	public uint DynamicCheckIntervalHours { get; set; } = 24;
 
 	// Wait after login before kicking off the first scan.
 	public uint InitialDelaySeconds { get; set; } = 60;
@@ -70,7 +71,8 @@ public sealed class PluginConfig {
 					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint days) && days > 0) { config.ScanIntervalDays = days; }
 					break;
 				case "DynamicCheckIntervalHours":
-					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint dh) && dh > 0) { config.DynamicCheckIntervalHours = dh; }
+					// 0 = disabled (no dynamic checks, full scan only).
+					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint dh)) { config.DynamicCheckIntervalHours = dh; }
 					break;
 				case "InitialDelaySeconds":
 					if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetUInt32(out uint delay)) { config.InitialDelaySeconds = delay; }
