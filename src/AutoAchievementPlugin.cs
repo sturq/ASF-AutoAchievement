@@ -32,7 +32,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 
 	public Task OnLoaded() {
 		ArchiSteamFarm.Core.ASF.ArchiLogger.LogGenericInfo(
-			$"{Name} v{Version} loaded — every bot's library will be scanned for new achievements. See !aahelp for commands."
+			$"{Name} v{Version} loaded - every bot's library will be scanned for new achievements. See !aahelp for commands."
 		);
 		return Task.CompletedTask;
 	}
@@ -58,7 +58,7 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 	}
 
 	public Task OnBotSteamCallbacksInit(Bot bot, CallbackManager callbackManager) {
-		// We don't subscribe to any SteamKit2 callbacks — pending requests
+		// We don't subscribe to any SteamKit2 callbacks - pending requests
 		// are matched by JobID inside AchievementsHandler.HandleMsg via TCS.
 		// Method exists only because IBotSteamClient requires it.
 		return Task.CompletedTask;
@@ -149,20 +149,20 @@ public sealed class AutoAchievementPlugin : IPlugin, IBotModules, IBotConnection
 
 	private static string HelpText() => string.Join('\n', new[] {
 		"AutoAchievement commands:",
-		"  aashow [bot]                              — status, current scan progress, totals",
-		"  aanow [bot]                               — run a full library scan immediately (alias: aascan)",
-		"  aacheck [bot]                             — dynamic check now: scan only games never seen before (alias: aadynamic)",
-		"  aacancel [bot]                            — cancel the in-flight scan, AutoIdle resumes (alias: aastop)",
-		"  aagame [bot] <appid|name>                 — unlock achievements for a single game",
-		"  aastats [bot] [N|all]                     — per-game stats (default: all, sorted by all-time desc)",
-		"  aablacklist [bot] <appid|name>            — never touch this game",
-		"  aablacklistremove [bot] <appid|name>      — remove from blacklist",
-		"  aainterval [bot] <days>                   — change full-scan interval in days (0 to reset to default)",
-		"  aadynamicinterval [bot] <hours|off|reset> — change dynamic-check interval in hours, 'off' to disable, 'reset' to clear override (alias: aadint)",
-		"  aaprotected [bot] [on|off|reset]          — runtime override for AttemptProtectedAchievements (no arg = show)",
-		"  aacards [bot]                             — toggle AllowCardFarming (yield play slot to ASF card farmer)",
-		"  aatoggle [bot]                            — toggle the plugin on/off at runtime",
-		"  aahelp                                    — this message"
+		"  aashow [bot]                              - status, current scan progress, totals",
+		"  aanow [bot]                               - run a full library scan immediately (alias: aascan)",
+		"  aacheck [bot]                             - dynamic check now: scan only games never seen before (alias: aadynamic)",
+		"  aacancel [bot]                            - cancel the in-flight scan, AutoIdle resumes (alias: aastop)",
+		"  aagame [bot] <appid|name>                 - unlock achievements for a single game",
+		"  aastats [bot] [N|all]                     - per-game stats (default: all, sorted by all-time desc)",
+		"  aablacklist [bot] <appid|name>            - never touch this game",
+		"  aablacklistremove [bot] <appid|name>      - remove from blacklist",
+		"  aainterval [bot] <days>                   - change full-scan interval in days (0 to reset to default)",
+		"  aadynamicinterval [bot] <hours|off|reset> - change dynamic-check interval in hours, 'off' to disable, 'reset' to clear override (alias: aadint)",
+		"  aaprotected [bot] [on|off|reset]          - runtime override for AttemptProtectedAchievements (no arg = show)",
+		"  aacards [bot]                             - toggle AllowCardFarming (yield play slot to ASF card farmer)",
+		"  aatoggle [bot]                            - toggle the plugin on/off at runtime",
+		"  aahelp                                    - this message"
 	});
 }
 
@@ -198,7 +198,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// When the most recent dynamic check ran (success or cancel). Dynamic
 	// check is overdue when (now - this) >= DynamicCheckIntervalHours.
 	private DateTime? _lastDynamicCheckAt;
-	// Per-mode metrics — every per-game scan attributes to one bucket
+	// Per-mode metrics - every per-game scan attributes to one bucket
 	// based on the scan it was part of.
 	private long _gamesScannedFullSession;
 	private long _gamesScannedFullAllTime;
@@ -274,7 +274,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal void Start() {
-		// Everything that touches _loop / _cts must stay inside the lock —
+		// Everything that touches _loop / _cts must stay inside the lock -
 		// otherwise concurrent Start() calls (UpdateConfig restart task +
 		// OnBotLoggedOn happening near-simultaneously after a config reload)
 		// can both pass the "is loop running?" check before either assigns
@@ -393,7 +393,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					// without killing the whole loop. Linked with the loop
 					// token so either source ends the scan. Mutex against
 					// !aanow/!aacheck: if a manual scan is already running,
-					// skip this iteration — racing two scans would stomp
+					// skip this iteration - racing two scans would stomp
 					// per-game Play(appID) calls.
 					CancellationTokenSource scanCts = new();
 					bool gotSlot;
@@ -432,7 +432,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							_scanSecondsAllTime += elapsedSecs;
 							_lastScanDurationSeconds = elapsedSecs;
 							_lastScanWasFullScan = fullScan;
-							// Every scan attempt counts as a dynamic check —
+							// Every scan attempt counts as a dynamic check -
 							// dynamic mode scans new games, full mode scans
 							// everything (which subsumes new games). So we
 							// always reset the dynamic clock.
@@ -450,7 +450,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							SavePersistentState();
 						}
 						if (userCancelled) {
-							_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} — AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
+							_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(TimeSpan.FromSeconds(elapsedSecs))} - AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
 						} else {
 							LogScanSummary(result, TimeSpan.FromSeconds(elapsedSecs));
 						}
@@ -463,7 +463,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 							_resumeFromAppID = null;
 							SavePersistentState();
 						}
-						_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan cancelled by user — AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
+						_bot.ArchiLogger.LogGenericInfo("AutoAchievement: scan cancelled by user - AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
 					} catch (Exception ex) {
 						_bot.ArchiLogger.LogGenericException(ex);
 					} finally {
@@ -522,7 +522,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 		}
 
-		// Target set is always the full dynamicstore — every AppID the bot
+		// Target set is always the full dynamicstore - every AppID the bot
 		// has access to, which catches achievements on never-played free
 		// games, demos that have stat schemas, etc. If dynamicstore fails
 		// we fall back to profile games for this cycle rather than returning
@@ -540,7 +540,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		// Dynamic check (fullScan=false) only scans games never seen before
-		// — every AppID NOT in _lastScannedAt. Full scan covers everything.
+		// - every AppID NOT in _lastScannedAt. Full scan covers everything.
 		if (!fullScan) {
 			HashSet<uint> alreadyScanned;
 			lock (_gate) { alreadyScanned = [.. _lastScannedAt.Keys]; }
@@ -548,7 +548,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		HashSet<uint> blacklist = EffectiveBlacklist(cfg);
-		// Sort targets by AppID so the order is stable across runs — required
+		// Sort targets by AppID so the order is stable across runs - required
 		// for resume-from-position to work correctly across reconnects.
 		List<uint> targets = targetSet.Where(id => !blacklist.Contains(id))
 			.OrderBy(static id => id).ToList();
@@ -556,10 +556,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		// Critical "least downtime" optimization: if dynamic check found
 		// nothing new, return immediately BEFORE signalling sibling pause.
 		// AutoIdle keeps playing without interruption; AA just records the
-		// check happened and moves on. Full scans don't take this path —
+		// check happened and moves on. Full scans don't take this path -
 		// they always have games to scan (the whole library).
 		if (!fullScan && targets.Count == 0) {
-			_bot.ArchiLogger.LogGenericInfo("AutoAchievement: dynamic check — no new games to scan, all known games already covered. AutoIdle continues uninterrupted.");
+			_bot.ArchiLogger.LogGenericInfo("AutoAchievement: dynamic check - no new games to scan, all known games already covered. AutoIdle continues uninterrupted.");
 			result.FullLibraryPass = true; // trivially complete
 			return result;
 		}
@@ -590,7 +590,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		int remaining = targets.Count - startIdx;
 		string mode = fullScan ? "full library scan" : "dynamic check (new games only)";
 		_bot.ArchiLogger.LogGenericInfo(
-			$"AutoAchievement: {mode} — scanning {remaining} game(s) (of {targets.Count} total, skipping {blacklist.Count} blacklisted). "
+			$"AutoAchievement: {mode} - scanning {remaining} game(s) (of {targets.Count} total, skipping {blacklist.Count} blacklisted). "
 			+ $"Estimated time: {FormatDuration(TimeSpan.FromMilliseconds((long) remaining * (cfg.PerGameDelayMilliseconds + 1500L)))}."
 		);
 
@@ -627,7 +627,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				}
 
 				// User has manually launched a game on this account. Hold the
-				// scan at this game until they close it — Steam won't accept
+				// scan at this game until they close it - Steam won't accept
 				// our Play() / stat writes for any other app while they're
 				// in-game.
 				if (!_bot.IsPlayingPossible) {
@@ -650,7 +650,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 					result.GamesProcessed++;
 					result.AchievementsUnlocked += outcome.Unlocked;
 
-					// Per-mode metrics — attribute each per-game scan to
+					// Per-mode metrics - attribute each per-game scan to
 					// whichever bucket initiated this run.
 					lock (_gate) {
 						if (fullScan) {
@@ -712,7 +712,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 			// Try AutoIdle first. If it acknowledges (returns a non-empty
 			// response), AutoIdle's restart will re-assert its batch via
-			// Play(batch) — calling Bot.Actions.Resume() ourselves first
+			// Play(batch) - calling Bot.Actions.Resume() ourselves first
 			// would just churn state and risk Steam ignoring the rapid
 			// pause→resume→play sequence. Only fall back to Resume() when
 			// AutoIdle isn't installed.
@@ -763,7 +763,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// Steam returns Fail / Invalid for apps that don't have a user-stats
 			// schema configured (i.e. no Steam achievements). Treat as "no achievements".
 			// Record the snapshot anyway so dynamic checks know we've seen this
-			// AppID — otherwise every dynamic check re-scans the same ~thousands
+			// AppID - otherwise every dynamic check re-scans the same ~thousands
 			// of DLC / soundtrack / demo / Steamworks-Redistributable entries
 			// from dynamicstore, because they never make it into _lastScannedAt
 			// and the filter (ExceptWith _lastScannedAt.Keys) sees them as new
@@ -785,10 +785,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		// Walk every bit in the schema. Track:
-		//   totalInSchema        — every achievement the game has
-		//   totalAlreadyUnlocked — already-unlocked count across ALL bits
-		//   protectedSkipped     — protected bits we won't even attempt
-		//   candidateCount       — locked, non-protected (or all if attempt-protected) bits we'll write back
+		//   totalInSchema        - every achievement the game has
+		//   totalAlreadyUnlocked - already-unlocked count across ALL bits
+		//   protectedSkipped     - protected bits we won't even attempt
+		//   candidateCount       - locked, non-protected (or all if attempt-protected) bits we'll write back
 		Dictionary<uint, uint> targetMask = new();
 		int totalInSchema = 0;
 		int totalAlreadyUnlocked = 0;
@@ -822,7 +822,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		}
 
 		if (candidateCount == 0) {
-			// Nothing to write — still record the schema snapshot so stats
+			// Nothing to write - still record the schema snapshot so stats
 			// reflect "X/Y unlocked" correctly even on a no-op pass.
 			RecordSchemaSnapshot(appID, totalInSchema, totalAlreadyUnlocked);
 
@@ -847,10 +847,10 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		if (store.Result != EResult.OK) {
 			RecordSchemaSnapshot(appID, totalInSchema, totalAlreadyUnlocked);
-			return new GameScanOutcome(0, false, NoAchievements: false, AlreadyComplete: false, Rejected: true, TotalInSchema: totalInSchema, Detail: $"Steam rejected the write with {store.Result} — the {candidateCount} remaining locked achievement(s) are server-validated and can't be unlocked from the client.");
+			return new GameScanOutcome(0, false, NoAchievements: false, AlreadyComplete: false, Rejected: true, TotalInSchema: totalInSchema, Detail: $"Steam rejected the write with {store.Result} - the {candidateCount} remaining locked achievement(s) are server-validated and can't be unlocked from the client.");
 		}
 
-		// Successful unlock — credit the per-game stats and bump the schema snapshot.
+		// Successful unlock - credit the per-game stats and bump the schema snapshot.
 		int newTotalUnlocked = totalAlreadyUnlocked + candidateCount;
 		lock (_gate) {
 			_allTimeUnlocked.TryGetValue(appID, out long allCount);
@@ -868,7 +868,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	// Holds the scan at the current game while ASF reports the bot can't play
-	// games — i.e. the Steam account is currently in a game launched outside
+	// games - i.e. the Steam account is currently in a game launched outside
 	// ASF (the user opened a title in their Steam client). Logs the stop and
 	// the resume so the user sees in the log exactly where the scan paused.
 	private async Task WaitWhilePlayingBlockedAsync(int idx, int total, uint appID, CancellationToken token) {
@@ -877,7 +877,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			if (blockedSince is null) {
 				blockedSince = DateTime.UtcNow;
 				_bot.ArchiLogger.LogGenericInfo(
-					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) — user is playing a game on this account. Will resume at this game when free."
+					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) - user is playing a game on this account. Will resume at this game when free."
 				);
 			}
 			try {
@@ -896,7 +896,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	// Pauses the scan while ASF's card farmer is using the play slot for
-	// its own farming. Polls every 15s — the farmer typically finishes a
+	// its own farming. Polls every 15s - the farmer typically finishes a
 	// single game in 5-30 minutes, so we'd otherwise idle here for a while.
 	private async Task WaitWhileCardFarmingAsync(int idx, int total, uint appID, CancellationToken token) {
 		DateTime? blockedSince = null;
@@ -908,7 +908,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			if (blockedSince is null) {
 				blockedSince = DateTime.UtcNow;
 				_bot.ArchiLogger.LogGenericInfo(
-					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) — ASF card farmer is active. Will resume at this game when farming completes."
+					$"AutoAchievement: stopped at {idx}/{total} ({FormatID(appID)}) - ASF card farmer is active. Will resume at this game when farming completes."
 				);
 			}
 			try {
@@ -944,7 +944,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// pause time to "ASF-AutoAchievement" in its idleshow / idlestats output.
 			await _bot.Commands.Response(EAccess.Owner, "idlepause " + _bot.BotName + " ASF-AutoAchievement", _bot.SteamID).ConfigureAwait(false);
 		} catch (Exception ex) {
-			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idlepause signal threw — {ex.Message}");
+			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idlepause signal threw - {ex.Message}");
 		}
 	}
 
@@ -954,7 +954,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			// Empty / null response = no plugin handled the command (AutoIdle not installed).
 			return !string.IsNullOrEmpty(response);
 		} catch (Exception ex) {
-			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idleresume signal threw — {ex.Message}");
+			_bot.ArchiLogger.LogGenericDebug($"AutoAchievement: idleresume signal threw - {ex.Message}");
 			return false;
 		}
 	}
@@ -962,7 +962,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private void LogScanSummary(ScanResult result, TimeSpan elapsed) {
 		List<string> lines = [];
 		string header = result.FullLibraryPass
-			? $"AutoAchievement: scan cycle complete in {FormatDuration(elapsed)} — waiting for next interval."
+			? $"AutoAchievement: scan cycle complete in {FormatDuration(elapsed)} - waiting for next interval."
 			: $"AutoAchievement: scan interrupted after {FormatDuration(elapsed)} (will resume from this point next time).";
 		lines.Add(header);
 		lines.Add($"  Games scanned: {result.GamesProcessed}");
@@ -1073,7 +1073,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		uint effDynHours = EffectiveDynamicCheckIntervalHours(cfg);
 		string dynIntervalLine = effDynHours == 0
 			? "  Dynamic-check interval: disabled (full scan only)"
-			: $"  Dynamic-check interval: every {effDynHours} hour(s) — scans games never seen before, no pause on AutoIdle when nothing new";
+			: $"  Dynamic-check interval: every {effDynHours} hour(s) - scans games never seen before, no pause on AutoIdle when nothing new";
 		if (dynIntervalOverride.HasValue) { dynIntervalLine += " (runtime override)"; }
 		lines.Add(dynIntervalLine);
 		lines.Add($"  Initial delay: {cfg.InitialDelaySeconds}s, per-game delay: {cfg.PerGameDelayMilliseconds}ms");
@@ -1091,7 +1091,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		if (scanStarted.HasValue && scanTotal > 0) {
 			TimeSpan elapsed = DateTime.UtcNow - scanStarted.Value;
 			string current = scanGame.HasValue ? FormatID(scanGame.Value) : "(idle between games)";
-			lines.Add($"  Currently scanning: {scanIdx}/{scanTotal} — {current}, started {FormatDuration(elapsed)} ago");
+			lines.Add($"  Currently scanning: {scanIdx}/{scanTotal} - {current}, started {FormatDuration(elapsed)} ago");
 		}
 
 		// Show whichever scan-end event is most recent so "next in" matches
@@ -1119,7 +1119,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			lines.Add("  Last scan: never (waiting for first run)");
 		}
 
-		// Dynamic check timing — independent of the full-scan cooldown.
+		// Dynamic check timing - independent of the full-scan cooldown.
 		// Suppress when disabled (interval = 0); the "interval: disabled"
 		// line above is enough info on its own.
 		if (effDynHours > 0) {
@@ -1138,7 +1138,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		// Falls back gracefully if we haven't run a scan yet.
 		if (lastTargetCount > 0) {
 			long estimatedMs = (long) lastTargetCount * (cfg.PerGameDelayMilliseconds + 1500L);
-			lines.Add($"  Next full-scan estimated duration: ~{FormatDuration(TimeSpan.FromMilliseconds(estimatedMs))} ({lastTargetCount} games × {cfg.PerGameDelayMilliseconds + 1500L}ms each — actual depends on Steam response and per-game pauses)");
+			lines.Add($"  Next full-scan estimated duration: ~{FormatDuration(TimeSpan.FromMilliseconds(estimatedMs))} ({lastTargetCount} games × {cfg.PerGameDelayMilliseconds + 1500L}ms each - actual depends on Steam response and per-game pauses)");
 		}
 
 		// Per-mode game-scan metrics.
@@ -1160,7 +1160,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	}
 
 	internal string HandleStats(string[] args) {
-		// aastats [N|all] — every game by all-time desc by default.
+		// aastats [N|all] - every game by all-time desc by default.
 		int top = int.MaxValue;
 		if (args.Length > 0) {
 			string raw = args[0].Trim();
@@ -1169,7 +1169,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			} else if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n > 0) {
 				top = n;
 			} else {
-				return "Usage: !aastats [N|all]   — every tracked game (default), or top N.";
+				return "Usage: !aastats [N|all]   - every tracked game (default), or top N.";
 			}
 		}
 
@@ -1263,7 +1263,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		// Register the CTS as _scanCancelCts so !aacancel can stop this run
 		// the same way it stops the loop's scheduled scan. Reject if a scan
-		// is already in flight (loop or another !aanow) — racing two
+		// is already in flight (loop or another !aanow) - racing two
 		// scans would have them both calling Play(appID) and stomping on
 		// each other's stat writes.
 		CancellationTokenSource cts = new(TimeSpan.FromHours(6));
@@ -1300,7 +1300,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				SavePersistentState();
 			}
 			if (userCancelled) {
-				_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
+				_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} - AutoIdle resuming. Resume point cleared; next scan starts from index 0.");
 				return $"Scan cancelled in {FormatDuration(elapsed)}.";
 			}
 			LogScanSummary(result, elapsed);
@@ -1313,7 +1313,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 				_resumeFromAppID = null;
 				SavePersistentState();
 			}
-			_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} — AutoIdle resuming.");
+			_bot.ArchiLogger.LogGenericInfo($"AutoAchievement: scan cancelled by user after {FormatDuration(elapsed)} - AutoIdle resuming.");
 			return $"Scan cancelled in {FormatDuration(elapsed)}.";
 		} finally {
 			lock (_gate) {
@@ -1345,7 +1345,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 			}
 			try { _bot.Actions.Resume(); } catch { }
 
-			string detailSuffix = string.IsNullOrEmpty(outcome.Detail) ? "" : $" — {outcome.Detail}";
+			string detailSuffix = string.IsNullOrEmpty(outcome.Detail) ? "" : $" - {outcome.Detail}";
 			return outcome.Unlocked > 0
 				? $"{FormatID(appID.Value)}: unlocked {outcome.Unlocked} achievement(s){detailSuffix}."
 				: outcome.HadError
@@ -1534,7 +1534,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 
 		if (args.Length == 0) {
 			return $"AttemptProtectedAchievements: {effective} (source: {source}; JSON default: {cfg.AttemptProtectedAchievements})\n"
-				+ "Usage: !aaprotected <on|off|reset>   — runtime override (reset to fall back to JSON config)";
+				+ "Usage: !aaprotected <on|off|reset>   - runtime override (reset to fall back to JSON config)";
 		}
 
 		string action = args[0].Trim().ToUpperInvariant();
@@ -1588,7 +1588,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	// Returns true iff (a) we're in coexist mode (AllowCardFarming=true)
 	// AND (b) ASF's card farmer is actively farming a game right now.
 	// In that state ScanLibraryAsync's per-game loop should defer before
-	// calling Play(appID) — otherwise we'd kick the card-farming game
+	// calling Play(appID) - otherwise we'd kick the card-farming game
 	// out of the play slot mid-drop.
 	private bool IsCardFarmingActive(PluginConfig cfg) {
 		if (!EffectiveAllowCardFarming(cfg)) { return false; }
@@ -1609,13 +1609,13 @@ internal sealed class BotRuntime : IAsyncDisposable {
 	private uint EffectiveDynamicCheckIntervalHours(PluginConfig cfg) {
 		uint? overrideValue;
 		lock (_gate) { overrideValue = _dynamicCheckIntervalHoursOverride; }
-		// 0 is a valid value here — it disables dynamic checks entirely.
+		// 0 is a valid value here - it disables dynamic checks entirely.
 		// We don't floor at 1 like full-scan-days because there's no
 		// reason to forbid "off".
 		return overrideValue ?? cfg.DynamicCheckIntervalHours;
 	}
 
-	// Last time a scan ended for any reason — completion or user-cancel.
+	// Last time a scan ended for any reason - completion or user-cancel.
 	// Cooldown gating is anchored on this so that cancelling a scan still
 	// pushes the next one out by a full interval (otherwise the loop would
 	// just retry within seconds and ignore the user's intent).
@@ -1655,7 +1655,7 @@ internal sealed class BotRuntime : IAsyncDisposable {
 		return ((int) d.TotalSeconds).ToString(CultureInfo.InvariantCulture) + "s";
 	}
 
-	// Full-resolution countdown for "time until next scan" displays — always
+	// Full-resolution countdown for "time until next scan" displays - always
 	// "Xd Yh Zm Ws" so glancing at aashow gives an exact figure regardless
 	// of magnitude. Used by aashow's "next in" and the loop's cooldown log
 	// line, NOT by FormatDuration's other callers (uptime, scan elapsed,

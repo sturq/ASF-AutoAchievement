@@ -86,7 +86,7 @@ jobs:
             else
               STRIPPED="${LATEST#v}"
               if [[ ! "$STRIPPED" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
-                echo "Latest tag '$LATEST' isn't a plain vMAJOR.MINOR.PATCH — bailing." >&2
+                echo "Latest tag '$LATEST' isn't a plain vMAJOR.MINOR.PATCH - bailing." >&2
                 exit 1
               fi
               MAJOR="${BASH_REMATCH[1]}"
@@ -97,7 +97,7 @@ jobs:
             fi
           fi
 
-          # Refuse to overwrite an existing tag — if a release for v$NEXT
+          # Refuse to overwrite an existing tag - if a release for v$NEXT
           # already exists, the user needs to bump explicitly via override.
           if git rev-parse "v${NEXT}" >/dev/null 2>&1; then
             echo "Tag v${NEXT} already exists. Use the workflow_dispatch override to pick a different version." >&2
@@ -178,7 +178,7 @@ jobs:
             ## Install
 
             1. Download `ASF-AutoAchievement-${{ steps.ver.outputs.tag }}.zip` from the assets below.
-            2. Extract it directly into `<your ASF folder>/plugins/` — the zip already contains the proper `ASF-AutoAchievement/` subfolder.
+            2. Extract it directly into `<your ASF folder>/plugins/` - the zip already contains the proper `ASF-AutoAchievement/` subfolder.
             3. Add to any bot config under `<ASF>/config/<BotName>.json`:
                ```json
                "AutoAchievement": { "Enabled": true }

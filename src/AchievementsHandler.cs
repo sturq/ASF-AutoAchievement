@@ -11,8 +11,8 @@ namespace ASF.AutoAchievement;
 
 /// <summary>
 /// Custom SteamKit2 handler that talks to Steam's user-stats service:
-///   - ClientGetUserStats     — fetch schema + current stat values
-///   - ClientStoreUserStats2  — push back updated stat values
+///   - ClientGetUserStats     - fetch schema + current stat values
+///   - ClientStoreUserStats2  - push back updated stat values
 ///
 /// Pending requests are matched to responses by JobID via TaskCompletionSource,
 /// so we don't need to register a callback with ASF's callback manager.
@@ -198,7 +198,7 @@ internal static class SchemaParser {
 
 			// Achievement-bitmap stats are identified by having a "bits" subkey
 			// (each bit corresponds to one achievement). The type field is
-			// usually "4" but we don't rely on that — presence of "bits" is
+			// usually "4" but we don't rely on that - presence of "bits" is
 			// definitional.
 			KeyValue bits = stat["bits"];
 			if (bits == KeyValue.Invalid || bits.Children.Count == 0) {

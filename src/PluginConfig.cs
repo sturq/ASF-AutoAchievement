@@ -15,7 +15,7 @@ public sealed class PluginConfig {
 	public bool Enabled { get; set; } = true;
 
 	// How often to re-scan the entire library for new achievements.
-	// Always full library — IPlayerService.GetOwnedGames doesn't include
+	// Always full library - IPlayerService.GetOwnedGames doesn't include
 	// free games never played, so we go through the dynamicstore endpoint
 	// (every AppID the account has access to).
 	public uint ScanIntervalDays { get; set; } = 7;
@@ -23,7 +23,7 @@ public sealed class PluginConfig {
 	// Between full scans, periodically check for newly-added games (free
 	// game claims, gifts, etc.) and unlock achievements for them once.
 	// Each dynamic check filters to AppIDs that have no _lastScannedAt
-	// entry — i.e. never scanned. New games are picked up within this
+	// entry - i.e. never scanned. New games are picked up within this
 	// interval; existing games still get rescanned by the full scan every
 	// ScanIntervalDays for any new achievements the dev added. Set to 0
 	// to disable dynamic checks entirely (full scan only).
@@ -36,14 +36,14 @@ public sealed class PluginConfig {
 	public uint PerGameDelayMilliseconds { get; set; } = 750;
 
 	// Try to set achievements whose schema lists permission > 0 (server-only).
-	// Steam normally rejects these — off by default to keep the log quiet.
+	// Steam normally rejects these - off by default to keep the log quiet.
 	// When false, protected bits are skipped client-side and never sent.
 	public bool AttemptProtectedAchievements { get; set; } = false;
 
 	// When true (default), defer per-game scan iterations while ASF's built-in
 	// card farmer is actively farming a game (CardsFarmer.NowFarming). The
 	// scan picks up exactly where it left off as soon as farming finishes.
-	// Set false to scan unconditionally — Play(appID) calls during the scan
+	// Set false to scan unconditionally - Play(appID) calls during the scan
 	// will knock the card-farming game out of the play slot mid-drop.
 	public bool AllowCardFarming { get; set; } = true;
 
