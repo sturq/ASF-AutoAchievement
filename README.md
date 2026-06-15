@@ -186,4 +186,4 @@ The compiled `ASF-AutoAchievement.dll` ends up in `./publish`. Copy it into `<AS
 
 ## License
 
-MIT.
+AGPL-3.0 — see [LICENSE](LICENSE). Forks and hosted modifications must keep the source open.
